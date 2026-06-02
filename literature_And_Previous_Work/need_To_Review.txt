@@ -18,3 +18,15 @@ aperature or psf photometry
 using B filter, more of a blue response
 
 17 mag = limit in dimmness of the Harvard plates
+
+If star doesn't show, get next brightest star
+
+Counts vs. mag; use distance modulus to find one star magnitude with other star
+
+cutout size: order of 20 arcmin; blue magnitude; B magnitude images of stars, need this for all stars
+
+R CrB, RY Sag
+
+Daschlab: Use max mag to figure out faintest object
+
+Aperature tests manually, psf works but is harder

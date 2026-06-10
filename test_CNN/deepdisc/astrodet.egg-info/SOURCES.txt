@@ -1,0 +1,14 @@
+LICENSE
+README.md
+setup.py
+astrodet/astrodet.py
+astrodet/colormap.py
+astrodet/detectron.py
+astrodet/hsc.py
+astrodet/scarlet.py
+astrodet/scarlet_update.py
+astrodet/visualizer.py
+astrodet.egg-info/PKG-INFO
+astrodet.egg-info/SOURCES.txt
+astrodet.egg-info/dependency_links.txt
+astrodet.egg-info/top_level.txt

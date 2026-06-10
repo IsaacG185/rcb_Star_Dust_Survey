@@ -1,0 +1,32 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: id, datatype: int64}
+# - {name: x_peak, datatype: int64}
+# - {name: y_peak, datatype: int64}
+# - {name: peak_value, datatype: float64}
+# meta: !!omap
+# - {date: '2026-06-03 17:16:58 Eastern Daylight Time'}
+# - version: {Python: 3.11.15, astropy: 7.2.0, bottleneck: 1.6.0, gwcs: 1.0.3, matplotlib: 3.10.9, numpy: 2.4.6, photutils: 3.0.0, scipy: 1.17.1,
+#     skimage: 0.26.0}
+# schema: astropy-2.0
+id x_peak y_peak peak_value
+1 735 40 1243.0
+2 32 49 393.0
+3 614 68 1253.0
+4 121 91 1943.0
+5 150 229 535.0
+6 154 233 535.0
+7 163 234 448.0
+8 238 285 493.0
+9 718 346 767.0
+10 726 347 804.0
+11 427 393 419.0
+12 140 409 383.0
+13 508 431 458.0
+14 301 465 414.0
+15 469 468 850.0
+16 519 481 968.0
+17 21 740 390.0
+18 264 793 390.0
+19 800 834 466.0

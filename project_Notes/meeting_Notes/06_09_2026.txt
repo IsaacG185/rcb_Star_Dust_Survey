@@ -1,0 +1,27 @@
+Add introduction into Overleaf
+Bibdesk - Helps with adding citations, if they are not already in the .bib file in overleaf; copy citation key (/citep{} for brackets, /citet for the in-text citation)
+
+plate_Error_1 : could be written into the plate; check full plate.
+plate_Error_3 : Limiting magnitude, look at this in the plate data; background varies a lot on the moon
+plate_Error_4 : try to avoid these; this duplication was likely purposeful, the plate was likely moved, toss these aside
+plate_Error_5 : likely dust or scratch, just avoid these.
+
+full width, half max (gaussian); do this above 9th magnitude (look for limited image)
+
+Run the deepdisc (after adjusting it to the needs of this project), see how it runs
+
+RadialProfile : Gaussian fits
+
+The stars tend to be oval, so aperture photometry tends to work best; use same circle for all stars on the plate.
+
+In using cutouts, they may be about the same in terms of viginetting, errors, etc; keep this in mind, but it should not be an issue; check the PSF of a cutout to look for differences.
+
+Careful when stars are bright; photmetric sequence; try to find brighter and dimmer stars than the target. 
+
+Oversaturation similar to CCDs can happen. Most objects are faint enough, but the more well known objects will likely have saturation.
+
+Rubin Observatory; goal is to add CCD data to this training algorithm, and this data will be used in the future when it goes online.
+
+Future object: dust cloud modeling
+
+highlight importance of dust structure in paper.

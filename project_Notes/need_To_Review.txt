@@ -1,0 +1,45 @@
+CNO Cycle
+Proton-proton chain
+Etalon
+Mira Type stars and their periodicities
+RV Tauri Stars
+AGB Stars
+DY Per star
+
+Photometry methods; V854 can get faint
+[] take two stars that are by themselves, compare them to see how it's doing (difference in magnitude should always be the same). Comparaison and check stars
+
+
+When too saturated (9th magnitude); view not by counts anymore, sort by width as there is relation between brigthness and width.
+
+[] Photographic plates; reciprocity failure; sanity check: counts per star for all stars
+
+Eventually, add plate limit
+
+PSF should be same for all stars, so sort through that
+
+aperature or psf photometry
+
+using B filter, more of a blue response
+
+17 mag = limit in dimmness of the Harvard plates
+
+If star doesn't show, get next brightest star
+
+Counts vs. mag; use distance modulus to find one star magnitude with other star
+
+cutout size: order of 20 arcmin; blue magnitude; B magnitude images of stars, need this for all stars
+
+R CrB, RY Sag
+
+Daschlab: Use max mag to figure out faintest object
+
+Aperature tests manually, psf works but is harder
+
+Double degenerate channel (?)
+
+Cameron Fowler mechanism
+
+SExtractor
+
+Astrometry.net

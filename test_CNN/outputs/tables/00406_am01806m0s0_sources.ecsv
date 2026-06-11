@@ -5,17 +5,19 @@
 # - {name: x_peak, datatype: int64}
 # - {name: y_peak, datatype: int64}
 # - {name: peak_value, datatype: float64}
+# - {name: aperture_flux, datatype: float64}
+# - {name: inst_mag, datatype: float64}
 # meta: !!omap
-# - {date: '2026-06-11 11:15:01 Eastern Daylight Time'}
+# - {date: '2026-06-11 12:14:32 Eastern Daylight Time'}
 # - version: {Python: 3.11.15, astropy: 7.2.0, bottleneck: 1.6.0, gwcs: 1.0.3, matplotlib: 3.10.9, numpy: 2.4.6, photutils: 3.0.0, scipy: 1.17.1,
 #     skimage: 0.26.0}
 # schema: astropy-2.0
-id x_peak y_peak peak_value
-1 118 90 2389.0
-2 771 186 609.0
-3 154 228 802.0
-4 155 237 812.0
-5 718 354 1311.0
-6 422 388 730.0
-7 464 466 1107.0
-8 22 730 851.0
+id x_peak y_peak peak_value aperture_flux inst_mag
+1 118 90 2389.0 178251.8006185916 -13.127584813978322
+2 771 186 609.0 33495.13441639378 -11.312454312399524
+3 154 228 802.0 56871.045577955854 -11.887228032146261
+4 155 237 812.0 57568.92494759147 -11.900470298594925
+5 718 354 1311.0 96083.0535315172 -12.456616991368465
+6 422 388 730.0 51491.09314265523 -11.779330279712955
+7 464 466 1107.0 78876.82597012681 -12.242373565323701
+8 22 730 851.0 60540.9014835815 -11.955122208813941

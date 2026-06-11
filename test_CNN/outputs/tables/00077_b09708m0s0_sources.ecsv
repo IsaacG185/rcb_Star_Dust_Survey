@@ -13,7 +13,7 @@
 # - {name: mag, datatype: float64}
 # - {name: daofind_mag, datatype: float64}
 # meta: !!omap
-# - {date: '2026-06-09 15:18:23 Eastern Daylight Time'}
+# - {date: '2026-06-11 11:14:41 Eastern Daylight Time'}
 # - version: {Python: 3.11.15, astropy: 7.2.0, bottleneck: 1.6.0, gwcs: 1.0.3, matplotlib: 3.10.9, numpy: 2.4.6, photutils: 3.0.0, scipy: 1.17.1,
 #     skimage: 0.26.0}
 # schema: astropy-2.0

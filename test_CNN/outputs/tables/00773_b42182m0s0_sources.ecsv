@@ -8,7 +8,7 @@
 # - {name: aperture_flux, datatype: float64}
 # - {name: inst_mag, datatype: float64}
 # meta: !!omap
-# - {date: '2026-06-11 12:15:05 Eastern Daylight Time'}
+# - {date: '2026-06-11 15:16:08 Eastern Daylight Time'}
 # - version: {Python: 3.11.15, astropy: 7.2.0, bottleneck: 1.6.0, gwcs: 1.0.3, matplotlib: 3.10.9, numpy: 2.4.6, photutils: 3.0.0, scipy: 1.17.1,
 #     skimage: 0.26.0}
 # schema: astropy-2.0

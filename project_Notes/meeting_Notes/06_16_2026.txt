@@ -1,0 +1,7 @@
+Try to use APASS to compare B magnitude of all stars; maybe SIMBAD (?). Try using Vizier for all catalogues if we want this to be more robust.
+
+Zero point equation and file document
+
+See if DAOFinder uses PSF fitting for different positions of the plate. Subtracting one star from another will help isolate errors. Is it doing PSF or aperture? Try median for all the sky
+
+Keep in mind for plates that are scarce in time; try to salvage what you can when needed (for the stats).

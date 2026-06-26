@@ -1,0 +1,1 @@
+@article{Clayton_2011, title={Two Centuries of Observing R Coronæ Borealis}, volume={7}, DOI={10.1017/S1743921312000427}, number={S285}, journal={Proceedings of the International Astronomical Union}, author={Clayton, Geoffrey C.}, year={2011}, pages={125–128}} <div></div>

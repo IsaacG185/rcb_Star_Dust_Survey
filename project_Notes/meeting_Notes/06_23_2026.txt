@@ -1,0 +1,21 @@
+doing photometry on a selection of stars we have B magnitudes of.
+
+sanity check: linear plot of the plates
+
+APASS B magnitude, use VIZIER, and then hand pick a good plate and find objects.
+
+Look at fits file of WCS coordinates
+
+Will probably need to load one good plate, use DAOFinder to do this, and then have the
+
+[] Load cutout with fits_read, take median of all pixels, subtract the median from every pixel, load APASS B magnitudes, find brightness of R CrB (then Cen V854) then feed that into DAOStarFinder. Can use same aperature for each star.
+
+Get file of plates that it does not know how to measure
+
+plt.iamshow();
+
+Get plate psf to get width of stars, there is a relation between what the mask looks and the psf. 
+
+Use daostarfinder to find plate limit (minimum star). Add plate limit on each star.
+
+When need question: send linear plot as well.

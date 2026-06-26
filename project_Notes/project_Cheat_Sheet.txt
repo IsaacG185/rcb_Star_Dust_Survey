@@ -1,23 +1,28 @@
-History:
-- First discovered in 1795 (Pigott & Englefield 1797).
-
 R Coronae Borealis Variables: 
-- Also known as RCB, R CrB, R Coronae Borealis stars, and R Coronae Borealis variables.
+
+- History : First discovered in 1795 (Pigott & Englefield 1797).
+
+- AKA : RCB, R CrB, R Coronae Borealis stars, and R Coronae Borealis variables.
 
 - Hydrogen deficient and Carbon rich supergiants (Clayton 2012a):
     - Spectral Class/Type : F or G supergiants (Clayton 1996)
     - Effective Temperature : 5000 - 7000 k (Clayton 1996)
+    - Lifespan : ~3 x 10^5 yrs ()
 
 - Extremely rare stars; about 162 are known (Crawford et al. 2025), 
 and it is believed that there are only about 300 - 500 in the Milky Way Galaxy (Crawford et al. 2020).
 
-- RCB stars undergo massive declines of up to 8 magnitudes caused by the formation of 
+- Observational features : RCB stars undergo massive declines of up to 8 magnitudes caused by the formation of 
 carbon dust at irregular intervals (Clayton 2012b).
 
+- Origin : Several evolutionary models have been suggested to account for the RCB stars, including a
+merger of two white dwarfs (WDs) or a final helium-shell flash (FF) in a PN central star (Clayton 2012b). The 
+white dwarf case is preferred.
+
 R Coronae Borealis:
-- AKA: R CrB, R Cor Bor, V* R CrB, HD 141527, 
+- AKA : R CrB, R Cor Bor, V* R CrB, HD 141527, 
 Gaia DR3 1224565824009709312, 2MASS J15483440+2809242,
 SAO 84015, AAVSO 1544+28A (SIMBAD)
 
 Cen V854:
-- AKA: V854, V854 Cen, 
+- AKA : V854, V854 Cen, 

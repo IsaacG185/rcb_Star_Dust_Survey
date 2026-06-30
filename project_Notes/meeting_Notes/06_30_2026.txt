@@ -1,0 +1,20 @@
+[Pre-Meeting Notes]
+Adjusted 01_Load_Cutout.ipynb:
+    - Downloaded 10,629 good plates of R CrB from 15,217. The 4,588 have been saved for
+    further analysis/salvaging. This took 11hr 35min.
+
+Adjusted 02_Source_Identification_And_Sorting_By_Algorithm.ipynb:
+    - Applied median subtraction to all pixels:
+         # Background estimation
+        mean, median, std = sigma_clipped_stats(data, sigma=3.0)
+        data_sub = data - median # Subtracting the median from the plate
+    - Implemented APASS B Magnitudes
+    - Implemented filters on plates that work best:
+        - good_match are best plates, these can be saved using plate_db.pkl
+    - Adjusted error categorization and identificaiton (i.e., dust, scratches, saturation)
+
+Questions
+    - Future concern: It appears that, around R CrB, there are not many stars to test it upon.
+    I can do a subtraction (i.e. dim star vs. R CrB), but a linearity check does not display enough
+    statistics. Any ideas?
+    - Need to change time when we are meeting. When works best?

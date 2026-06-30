@@ -7,7 +7,7 @@ R Coronae Borealis Variables:
 - Hydrogen deficient and Carbon rich supergiants (Clayton 2012a):
     - Spectral Class/Type : F or G supergiants (Clayton 1996)
     - Effective Temperature : 5000 - 7000 k (Clayton 1996)
-    - Lifespan : ~3 x 10^5 yrs ()
+    - Lifespan : ~3 x 10^5 yrs (Karakas et al. 2015)
 
 - Extremely rare stars; about 162 are known (Crawford et al. 2025), 
 and it is believed that there are only about 300 - 500 in the Milky Way Galaxy (Crawford et al. 2020).

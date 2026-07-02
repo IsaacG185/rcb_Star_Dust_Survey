@@ -1,0 +1,5 @@
+R CrB
+
+00235_i24819m1s0.fits
+00460_i28786m0s0.fits (really good)
+00678_i30601m1s0.fits

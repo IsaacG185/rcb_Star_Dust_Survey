@@ -1,0 +1,1852 @@
+# Cell 1
+
+from pathlib import Path
+from astropy.io import fits
+from astropy.stats import sigma_clipped_stats
+
+from photutils.detection import DAOStarFinder, find_peaks
+from photutils.aperture import CircularAperture, CircularAnnulus, ApertureStats, aperture_photometry
+
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Paths
+cutout_dir = Path(
+    r"C:\Users\dapur\Downloads\Other\Research\rcb_Star_Dust_Survey\test_CNN\data\R_CrB\cutouts"
+)
+
+output_dir = Path("../outputs/tables")
+output_dir.mkdir(parents=True, exist_ok=True)
+
+# Detection parameters
+FWHM = 3.0
+THRESHOLD_SIGMA = 5.0
+MIN_SOURCES_DAO = 5   # fallback threshold
+BOX_SIZE = 11         # for find_peaks fallback
+
+cutouts = sorted(cutout_dir.glob("*.fits"))
+print(f"Found {len(cutouts)} cutouts to process")
+
+# Cell 2
+
+from photutils.aperture import CircularAperture, aperture_photometry
+
+def detect_sources(fits_path, aperture_radius=5.0):
+    """
+    Detect stars and compute fixed-aperture photometry for APASS calibration.
+    """
+    
+    # Load FITS
+    data = fits.getdata(fits_path).astype(float)
+    data = np.nan_to_num(data, nan=np.nanmedian(data))
+
+    # Background estimation
+    mean, median, std = sigma_clipped_stats(data, sigma=3.0)
+    data_sub = data - median # Subtracting the median from the plate
+
+    # Source detection (DAOStarFinder first)
+    try:
+        daofind = DAOStarFinder(
+            fwhm=FWHM,
+            threshold=THRESHOLD_SIGMA * std,
+            sharpness_range=(0.2, 2.0)
+        )
+        sources = daofind(data_sub)
+        algorithm = "DAOStarFinder"
+
+    except Exception:
+        sources = None
+        algorithm = "DAOStarFinder_failed"
+
+    # Fallback to find_peaks if needed
+    if sources is None or len(sources) < MIN_SOURCES_DAO:
+        sources = find_peaks(
+            data_sub,
+            threshold=THRESHOLD_SIGMA * std,
+            box_size=BOX_SIZE
+        )
+        algorithm = "find_peaks"
+
+    if sources is None or len(sources) == 0:
+        return None, algorithm, data, data_sub, std, None, None
+
+    # Choose centroid columns
+    if "x_centroid" in sources.colnames:
+        x_col, y_col = "x_centroid", "y_centroid"
+    else:
+        x_col, y_col = "x_peak", "y_peak"
+
+    positions = np.transpose((sources[x_col], sources[y_col]))
+
+    # Fixed aperture photometry
+    apertures = CircularAperture(positions, r=aperture_radius)
+    phot_table = aperture_photometry(data_sub, apertures)
+    
+    sources["aperture_flux"] = phot_table["aperture_sum"]
+    return sources, algorithm, data, data_sub, std, x_col, y_col
+
+# Cell 3
+
+%matplotlib widget
+
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+
+import pickle
+from pathlib import Path
+
+from photutils.aperture import CircularAperture, aperture_photometry
+
+from astropy.io import fits as astrofits
+from astropy.wcs import WCS
+from astropy.coordinates import SkyCoord, match_coordinates_sky, search_around_sky
+import astropy.units as u
+
+from astroquery.gaia import Gaia
+from astroquery.simbad import Simbad
+from astroquery.vizier import Vizier
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.lines import Line2D
+from scipy import ndimage
+from skimage.transform import hough_line, hough_line_peaks
+import warnings
+
+APERTURE_RADIUS = 5.0
+
+# Target
+R_CRB = SkyCoord(
+    ra=237.14339784473003 * u.deg,
+    dec=28.1567488479 * u.deg
+)
+
+# Bump this whenever target-detection logic changes. On the next run_scan(),
+# any cached plate whose stored target_version doesn't match gets a cheap
+# re-check (reopen FITS, no Gaia/SIMBAD/APASS network calls) instead of a
+# full rescan, so target-detection fixes can backfill the whole cache fast.
+TARGET_DETECTION_VERSION = 2
+
+# Cache
+
+BASE_DIR = Path(r"C:\Users\dapur\Downloads\Other\Research\rcb_Star_Dust_Survey\test_CNN")
+
+gaia_dir = BASE_DIR / "data" / "gaia"
+gaia_dir.mkdir(parents=True, exist_ok=True)
+
+PLATE_DB_FILE = gaia_dir / "plate_db.pkl"
+GAIA_CACHE_FILE = gaia_dir / "gaia_cache.pkl"
+APASS_CACHE_FILE = gaia_dir / "apass_cache.pkl"
+NAME_CACHE_FILE = gaia_dir / "gaia_name_cache.pkl"
+
+if GAIA_CACHE_FILE.exists():
+    with open(GAIA_CACHE_FILE, "rb") as f:
+        gaia_cache = pickle.load(f)
+else:
+    gaia_cache = {}
+
+if APASS_CACHE_FILE.exists():
+    with open(APASS_CACHE_FILE, "rb") as f:
+        apass_cache = pickle.load(f)
+else:
+    apass_cache = {}
+
+if NAME_CACHE_FILE.exists():
+    with open(NAME_CACHE_FILE, "rb") as f:
+        gaia_name_cache = pickle.load(f)
+else:
+    gaia_name_cache = {}
+
+# Paradigm Plate Workflow
+
+PARADIGM_DB_FILE = gaia_dir / "paradigm_db.pkl"
+PARADIGM_VERSION_FILE = gaia_dir / "paradigm_version.pkl"
+
+if PARADIGM_DB_FILE.exists():
+    with open(PARADIGM_DB_FILE, "rb") as f:
+        paradigm_db = pickle.load(f)
+else:
+    paradigm_db = {}   # { plate_path_str: [ {ra, dec, label, source}, ... ] }
+
+paradigm_version = pickle.load(open(PARADIGM_VERSION_FILE, "rb")) if PARADIGM_VERSION_FILE.exists() else 0
+
+PARADIGM_MATCH_SEP_ARCSEC = 3.0  # tolerance for matching paradigm objects onto other plates
+PARADIGM_CLICK_PX = 15           # how close a click must be to an existing marker to select/remove it
+
+def save_paradigm_db():
+    with open(PARADIGM_DB_FILE, "wb") as f:
+        pickle.dump(paradigm_db, f)
+
+def bump_paradigm_version():
+    global paradigm_version
+    paradigm_version += 1
+    with open(PARADIGM_VERSION_FILE, "wb") as vf:
+        pickle.dump(paradigm_version, vf)
+
+def suggest_name_at(ra, dec):
+    """Look up SIMBAD/Gaia at a sky position, return a best-guess label."""
+    coord = SkyCoord(ra * u.deg, dec * u.deg)
+    try:
+        simbad = Simbad()
+        simbad.TIMEOUT = 30
+        result = simbad.query_region(coord, radius=PARADIGM_MATCH_SEP_ARCSEC * u.arcsec)
+        if result is not None and len(result) > 0:
+            name = str(result[0]["MAIN_ID"])
+            if not name.startswith("Gaia"):
+                return name, "SIMBAD"
+    except Exception as e:
+        print("[SIMBAD lookup]", e)
+
+    try:
+        job = Gaia.launch_job_async(f"""
+            SELECT TOP 1 source_id, DISTANCE(
+                POINT('ICRS', ra, dec),
+                POINT('ICRS', {ra}, {dec})
+            ) AS dist
+            FROM gaiadr3.gaia_source
+            WHERE CONTAINS(
+                POINT('ICRS', ra, dec),
+                CIRCLE('ICRS', {ra}, {dec}, {(PARADIGM_MATCH_SEP_ARCSEC * u.arcsec).to(u.deg).value})
+            ) = 1
+            ORDER BY dist ASC
+        """)
+        result = job.get_results()
+        if result is not None and len(result) > 0:
+            return f"Gaia {result[0]['source_id']}", "Gaia"
+    except Exception as e:
+        print("[Gaia lookup]", e)
+
+    return "Unknown", "none"
+
+
+# Display mode — "Paradigm" was removed as a label mode (Object ID already
+# folds in paradigm-resolved names with priority, see resolve_gaia_label()
+# below); whether a plate was used as a paradigm reference is now shown by
+# the read-only "Reference Plate" checkbox instead.
+display_mode = widgets.ToggleButtons(
+    options=["GAIA ID", "Object ID"],
+    value="GAIA ID",
+    description="Labels:"
+)
+
+# Error toggle — single show/hide
+error_toggle = widgets.ToggleButtons(
+    options=["Show Errors", "Hide Errors"],
+    value="Show Errors",
+    description="Errors:"
+)
+
+# Read-only indicator: ticked whenever the currently loaded plate has any
+# saved paradigm labels (i.e. it has been used as a reference plate).
+paradigm_ref_indicator = widgets.Checkbox(
+    value=False,
+    description="Reference Plate (used for Paradigm labels)",
+    disabled=True,
+    indent=False
+)
+
+# Metadata
+def get_plate_date(fits_path):
+    try:
+        header = astrofits.getheader(fits_path)
+        for key in ["DATE-OBS", "DATE", "DATEOBS", "MJD-OBS"]:
+            if key in header:
+                return str(header[key])
+        return "Unknown"
+    except:
+        return "Unknown"
+
+# Error detection
+def detect_plate_errors(data):
+
+    errors = {
+        "scratches":  [],
+        "trailing":   [],
+        "saturation": [],
+        "dust":       [],
+        "edge":       False,
+    }
+
+    h, w = data.shape
+
+    lo, hi = np.nanpercentile(data, 1), np.nanpercentile(data, 99)
+    if hi == lo:
+        return errors
+    norm = np.clip((data - lo) / (hi - lo), 0, 1)
+
+    # Scratches
+    try:
+        scale   = 4
+        small   = ndimage.zoom(norm, 1 / scale, order=1)
+        sobel_h = ndimage.sobel(small, axis=0)
+        sobel_v = ndimage.sobel(small, axis=1)
+        edges   = np.hypot(sobel_h, sobel_v)
+        edges   = (edges > np.percentile(edges, 97)).astype(np.uint8)
+
+        tested_angles = np.linspace(-np.pi / 2, np.pi / 2, 180, endpoint=False)
+        hspace, angles, dists = hough_line(edges, theta=tested_angles)
+
+        peaks = hough_line_peaks(
+            hspace, angles, dists,
+            num_peaks=8,
+            min_distance=20,
+            threshold=0.35 * hspace.max()
+        )
+
+        sh, sw = small.shape
+        for _, angle, dist in zip(*peaks):
+            cos_a, sin_a = np.cos(angle), np.sin(angle)
+            if abs(sin_a) > 1e-6:
+                x0_s, x1_s = 0, sw - 1
+                y0_s = (dist - x0_s * cos_a) / sin_a
+                y1_s = (dist - x1_s * cos_a) / sin_a
+            else:
+                y0_s, y1_s = 0, sh - 1
+                x0_s = x1_s = dist / cos_a if abs(cos_a) > 1e-6 else 0
+
+            y0_s = float(np.clip(y0_s, 0, sh - 1))
+            y1_s = float(np.clip(y1_s, 0, sh - 1))
+            x0_s = float(np.clip(x0_s, 0, sw - 1))
+            x1_s = float(np.clip(x1_s, 0, sw - 1))
+
+            errors["scratches"].append({
+                "x0": x0_s * scale, "y0": y0_s * scale,
+                "x1": x1_s * scale, "y1": y1_s * scale,
+            })
+    except Exception as e:
+        print(f"[SCRATCH DETECT] {e}")
+
+    # Trailing stars (only flags sources with extreme elongation (>5) and minimum area)
+    try:
+        bright_mask = (norm > np.percentile(norm, 95)).astype(np.uint8)
+        labeled, n_obj = ndimage.label(bright_mask)
+
+        for obj_id in range(1, n_obj + 1):
+            region = labeled == obj_id
+            area   = region.sum()
+            if area < 40 or area > 0.005 * h * w:
+                continue
+
+            coords = np.argwhere(region)
+            if len(coords) < 10:
+                continue
+
+            cov  = np.cov(coords[:, 1], coords[:, 0])
+            eigs = np.linalg.eigvalsh(cov)
+            eigs = np.sort(np.abs(eigs))
+            if eigs[0] < 1e-6:
+                continue
+
+            elongation = np.sqrt(eigs[1] / eigs[0])
+            if elongation > 5.0:
+                cy_r, cx_r = coords.mean(axis=0)
+                angle = 0.5 * np.degrees(np.arctan2(
+                    2 * cov[0, 1], cov[0, 0] - cov[1, 1]
+                ))
+                major = 2 * np.sqrt(eigs[1])
+                minor = 2 * np.sqrt(eigs[0])
+                errors["trailing"].append({
+                    "x": float(cx_r), "y": float(cy_r),
+                    "w": float(major), "h": float(minor),
+                    "angle": float(angle)
+                })
+    except Exception as e:
+        print(f"[TRAIL DETECT] {e}")
+
+    # Saturation / blooming (must be large and at the absolute ceiling)
+    try:
+        sat_thresh = np.percentile(norm, 99.9)
+        sat_mask   = (norm >= sat_thresh).astype(np.uint8)
+        sat_mask   = ndimage.binary_dilation(sat_mask, iterations=2).astype(np.uint8)
+        labeled, n_obj = ndimage.label(sat_mask)
+
+        for obj_id in range(1, n_obj + 1):
+            region = labeled == obj_id
+            area   = region.sum()
+            if area < 200:
+                continue
+
+            coords  = np.argwhere(region)
+            cy_r, cx_r = coords.mean(axis=0)
+            ry = (coords[:, 0].max() - coords[:, 0].min()) / 2
+            rx = (coords[:, 1].max() - coords[:, 1].min()) / 2
+            r  = np.hypot(rx, ry)
+
+            errors["saturation"].append({
+                "x": float(cx_r), "y": float(cy_r), "r": float(r)
+            })
+    except Exception as e:
+        print(f"[SAT DETECT] {e}")
+
+    # Dust spots / emulsion streaks. Old-plate dust damage is often thin,
+    # curly, and elongated (not round) — the previous version rejected
+    # anything with aspect > 3, and a double erosion pass was strong enough
+    # to erase thin 1-2px streaks before they could even be measured.
+    # Loosened both so curly streaks get caught instead of silently dropped.
+    try:
+        dust_thresh = np.percentile(norm, 5)  # widened from 2nd percentile
+        dark_mask   = (norm <= dust_thresh).astype(np.uint8)
+        # Light dilation first to bridge gaps in thin broken streaks, then
+        # a single (not double) erosion pass to clear single-pixel noise.
+        dark_mask = ndimage.binary_dilation(dark_mask, iterations=1).astype(np.uint8)
+        dark_mask = ndimage.binary_erosion(dark_mask, iterations=1).astype(np.uint8)
+        labeled, n_obj = ndimage.label(dark_mask)
+
+        for obj_id in range(1, n_obj + 1):
+            region = labeled == obj_id
+            area   = region.sum()
+            if area < 15 or area > 0.02 * h * w:  # widened area window for long streaks
+                continue
+
+            coords  = np.argwhere(region)
+            cy_r, cx_r = coords.mean(axis=0)
+            ry = (coords[:, 0].max() - coords[:, 0].min()) / 2
+            rx = (coords[:, 1].max() - coords[:, 1].min()) / 2
+
+            if rx < 1e-6 or ry < 1e-6:
+                continue
+            # NOTE: the old "if aspect > 3: continue" cutoff was removed —
+            # it was specifically excluding the elongated streaks we want.
+
+            r = np.hypot(rx, ry)
+            errors["dust"].append({
+                "x": float(cx_r), "y": float(cy_r), "r": float(r)
+            })
+    except Exception as e:
+        print(f"[DUST DETECT] {e}")
+
+    # Edge artifacts
+    try:
+        border = max(20, int(min(h, w) * 0.05))
+        center_med = np.nanmedian(norm[border:h-border, border:w-border])
+        center_std = np.nanstd(norm[border:h-border, border:w-border])
+
+        edge_strips = [
+            norm[:border, :],
+            norm[h-border:, :],
+            norm[:, :border],
+            norm[:, w-border:],
+        ]
+
+        for strip in edge_strips:
+            strip_med = np.nanmedian(strip)
+            if abs(strip_med - center_med) > 3 * center_std:
+                errors["edge"] = True
+                break
+    except Exception as e:
+        print(f"[EDGE DETECT] {e}")
+
+    return errors
+
+
+def annotate_errors(ax, errors):
+    # Draw all error types at once, each with its own color and category label
+
+    legend_handles = []
+
+    # Scratches
+    for s in errors["scratches"]:
+        ax.plot(
+            [s["x0"], s["x1"]], [s["y0"], s["y1"]],
+            color="magenta", linewidth=1.2, alpha=0.8, linestyle="--"
+        )
+    if errors["scratches"]:
+        legend_handles.append(
+            Line2D([0], [0], color="magenta", linestyle="--", label=f'Scratch ×{len(errors["scratches"])}')
+        )
+
+    # Trailing stars
+    for t in errors["trailing"]:
+        ellipse = mpatches.Ellipse(
+            (t["x"], t["y"]),
+            width=t["w"], height=t["h"],
+            angle=t["angle"],
+            edgecolor="orange", facecolor="none",
+            linewidth=1.5, alpha=0.85
+        )
+        ax.add_patch(ellipse)
+        ax.text(
+            t["x"] + t["w"] / 2 + 3, t["y"],
+            "trail", color="orange", fontsize=5,
+            va="center"
+        )
+    if errors["trailing"]:
+        legend_handles.append(
+            mpatches.Patch(edgecolor="orange", facecolor="none",
+                           label=f'Trailing ×{len(errors["trailing"])}')
+        )
+
+    # Saturation
+    for s in errors["saturation"]:
+        circ = plt.Circle(
+            (s["x"], s["y"]), s["r"],
+            edgecolor="red", facecolor="none",
+            linewidth=1.5, alpha=0.8, linestyle="-."
+        )
+        ax.add_patch(circ)
+        ax.text(
+            s["x"], s["y"] - s["r"] - 4,
+            "sat", color="red", fontsize=5,
+            ha="center"
+        )
+    if errors["saturation"]:
+        legend_handles.append(
+            mpatches.Patch(edgecolor="red", facecolor="none",
+                           label=f'Saturation ×{len(errors["saturation"])}')
+        )
+
+    # Dust spots
+    for d in errors["dust"]:
+        circ = plt.Circle(
+            (d["x"], d["y"]), d["r"],
+            edgecolor="deepskyblue", facecolor="none",
+            linewidth=1.2, alpha=0.8, linestyle=":"
+        )
+        ax.add_patch(circ)
+        ax.text(
+            d["x"], d["y"] - d["r"] - 4,
+            "dust", color="deepskyblue", fontsize=5,
+            ha="center"
+        )
+    if errors["dust"]:
+        legend_handles.append(
+            mpatches.Patch(edgecolor="deepskyblue", facecolor="none",
+                           label=f'Dust ×{len(errors["dust"])}')
+        )
+
+    # Edge artifacts
+    if errors["edge"]:
+        ax_h, ax_w = ax.get_ylim(), ax.get_xlim()
+        img_h = abs(ax_h[1] - ax_h[0])
+        img_w = abs(ax_w[1] - ax_w[0])
+        rect = mpatches.Rectangle(
+            (min(ax_w), min(ax_h)), img_w, img_h,
+            edgecolor="lime", facecolor="none",
+            linewidth=2.5, alpha=0.7
+        )
+        ax.add_patch(rect)
+        legend_handles.append(
+            mpatches.Patch(edgecolor="lime", facecolor="none",
+                           label="Edge artifact")
+        )
+
+    if legend_handles:
+        ax.legend(
+            handles=legend_handles,
+            loc="upper left",
+            fontsize=6,
+            framealpha=0.6,
+            facecolor="black",
+            labelcolor="white",
+            edgecolor="gray"
+        )
+
+# Plate quality categorization: too many errors to use / matches the catalog well / defective altogether / fair
+def classify_plate_quality(errors, n_sources, n_matched):
+
+    n_scratches  = len(errors["scratches"])
+    n_trailing   = len(errors["trailing"])
+    n_saturation = len(errors["saturation"])
+    n_dust       = len(errors["dust"])
+    n_edge       = 1 if errors["edge"] else 0
+
+    total_defects = n_scratches + n_trailing + n_saturation + n_dust + n_edge
+
+    match_fraction = (n_matched / n_sources) if n_sources > 0 else 0.0
+
+    # Defective: the plate itself looks unusable (heavy blooming, edge issues
+    # combined with other defects, or almost no real detections on a messy frame)
+    if (n_saturation >= 8) or (errors["edge"] and total_defects >= 6) or (n_sources < 3 and total_defects >= 3):
+        return "defective"
+
+    # Too many errors: salvageable in principle but heavily contaminated
+    if total_defects >= 8:
+        return "too_many_errors"
+
+    # Good match: detections agree well with the reference catalogs (Gaia / APASS)
+    if match_fraction >= 0.5 and total_defects < 8:
+        return "good_match"
+
+    # Nothing stood out either way
+    return "fair"
+
+# Retroactive label enrichment: re-resolve names for all already-scanned plates using whatever is now in gaia_name_cache (without re-querying Gaia or SIMBAD).
+def enrich_previous_plates(plate_db, up_to_key):
+
+    keys = list(plate_db.keys())
+    stop = keys.index(up_to_key) if up_to_key in keys else len(keys)
+
+    for f in keys[:stop]:
+
+        r = plate_db[f].get("render")
+
+        if r is None:
+            continue
+
+        old_resolved = r["resolved_names"]
+        new_resolved = resolve_names(r["gaia_names"], ["Unknown"] * len(r["gaia_names"]))
+
+        # Only update entries that were previously Unknown and are now known.
+        # Anything else (including a raw "Gaia <id>" string left over from a
+        # paradigm label) gets one more pass through resolve_gaia_label() in
+        # case the name cache has since learned that source's real name.
+        merged = []
+        for old, new in zip(old_resolved, new_resolved):
+            if old == "Unknown" and new != "Unknown":
+                merged.append(new)
+            else:
+                merged.append(resolve_gaia_label(old))
+
+        r["resolved_names"] = merged
+
+# GAIA catalog (used only to assign GAIA source IDs to detected sources)
+def get_plate_catalog_gaia(wcs, shape):
+
+    cx, cy = shape[1] / 2, shape[0] / 2
+    ra_c, dec_c = wcs.pixel_to_world_values(cx, cy)
+
+    ra_c = float(np.array(ra_c))
+    dec_c = float(np.array(dec_c))
+
+    key = (round(ra_c, 4), round(dec_c, 4))
+
+    if key in gaia_cache:
+        return gaia_cache[key]
+
+    radius = 0.15 * u.deg
+    center = SkyCoord(ra_c * u.deg, dec_c * u.deg)
+
+    query = f"""
+    SELECT source_id, ra, dec
+    FROM gaiadr3.gaia_source
+    WHERE CONTAINS(
+        POINT('ICRS', ra, dec),
+        CIRCLE('ICRS', {ra_c}, {dec_c}, {radius.to(u.deg).value})
+    ) = 1
+    """
+
+    try:
+        job = Gaia.launch_job_async(query)
+        result = job.get_results()
+
+        if result is None:
+            result = []
+
+        gaia_cache[key] = result
+
+        with open(GAIA_CACHE_FILE, "wb") as f:
+            pickle.dump(gaia_cache, f)
+
+        print(f"[GAIA] loaded {len(result)} sources")
+
+        return result
+
+    except Exception as e:
+        print("[GAIA ERROR]", e)
+        gaia_cache[key] = []
+        return []
+
+# APASS catalog (used for B-band calibration magnitudes, via VizieR II/336/apass9)
+def get_plate_catalog_apass(wcs, shape):
+
+    cx, cy = shape[1] / 2, shape[0] / 2
+    ra_c, dec_c = wcs.pixel_to_world_values(cx, cy)
+
+    ra_c = float(np.array(ra_c))
+    dec_c = float(np.array(dec_c))
+
+    key = (round(ra_c, 4), round(dec_c, 4))
+
+    if key in apass_cache:
+        return apass_cache[key]
+
+    radius = 0.15 * u.deg
+    center = SkyCoord(ra_c * u.deg, dec_c * u.deg)
+
+    try:
+        vquery = Vizier(
+            columns=["recno", "RAJ2000", "DEJ2000", "Vmag", "e_Vmag", "Bmag", "e_Bmag"],
+            row_limit=-1
+        )
+
+        result_list = vquery.query_region(
+            center,
+            radius=radius,
+            catalog="II/336/apass9"
+        )
+
+        if result_list is None or len(result_list) == 0:
+            apass_cache[key] = []
+            return []
+
+        result = result_list[0]
+        result = result[np.isfinite(result["Bmag"])]
+
+        # Standardize column names so the rest of the pipeline can treat this
+        # like any other catalog table
+        result.rename_column("RAJ2000", "ra")
+        result.rename_column("DEJ2000", "dec")
+        result.rename_column("Bmag", "b_mag")
+
+        apass_cache[key] = result
+
+        with open(APASS_CACHE_FILE, "wb") as f:
+            pickle.dump(apass_cache, f)
+
+        print(f"[APASS] loaded {len(result)} sources")
+
+        return result
+
+    except Exception as e:
+        print("[APASS ERROR]", e)
+        apass_cache[key] = []
+        return []
+
+# SIMBAD Name resolver
+def get_simbad_names(ra, dec, max_sep_arcsec=5):
+
+    names = ["Unknown"] * len(ra)
+
+    try:
+        simbad = Simbad()
+        simbad.TIMEOUT = 60
+        simbad.add_votable_fields("main_id", "ra", "dec")
+
+        coords = SkyCoord(ra=ra*u.deg, dec=dec*u.deg)
+
+        sim_results = []
+
+        # query each source individually (slow but correct)
+        for c in coords:
+            result = simbad.query_region(c, radius=max_sep_arcsec * u.arcsec)
+
+            if result is None or len(result) == 0:
+                sim_results.append(None)
+                continue
+
+            sim_results.append(result[0])
+
+        for i, row in enumerate(sim_results):
+            if row is None:
+                continue
+
+            name = str(row["MAIN_ID"])
+
+            if name.startswith("Gaia"):
+                continue
+
+            names[i] = name
+
+    except Exception as e:
+        print("[SIMBAD]", e)
+
+    return names
+
+# GAIA Crossmatch labels
+def match_detected_sources_gaia(ra, dec, catalog, max_sep_arcsec=2.5):
+
+    if catalog is None or len(catalog) == 0:
+        return ["Unknown"] * len(ra)
+
+    cat_coords = SkyCoord(catalog["ra"], catalog["dec"], unit="deg")
+    src_coords = SkyCoord(ra * u.deg, dec * u.deg)
+
+    idx, sep, _ = match_coordinates_sky(src_coords, cat_coords)
+
+    labels = []
+
+    for j in range(len(src_coords)):
+        if sep[j].arcsec <= max_sep_arcsec and sep[j].arcsec < 3.0:
+            labels.append(f"Gaia {catalog['source_id'][idx[j]]}")
+        else:
+            labels.append("Unknown")
+
+    return labels
+
+# Paradigm crossmatch labels — pools every labeled object across all paradigm plates
+def match_against_paradigm(ra, dec, max_sep_arcsec=PARADIGM_MATCH_SEP_ARCSEC):
+
+    all_entries = [e for entries in paradigm_db.values() for e in entries]
+    if not all_entries:
+        return ["Unknown"] * len(ra)
+
+    cat_coords = SkyCoord([e["ra"] for e in all_entries], [e["dec"] for e in all_entries], unit="deg")
+    src_coords = SkyCoord(ra * u.deg, dec * u.deg)
+    idx, sep, _ = match_coordinates_sky(src_coords, cat_coords)
+
+    labels = []
+    for j in range(len(src_coords)):
+        if sep[j].arcsec <= max_sep_arcsec:
+            labels.append(all_entries[idx[j]]["label"])
+        else:
+            labels.append("Unknown")
+    return labels
+
+def update_name_cache(gaia_labels, simbad_names):
+
+    changed = False
+
+    for g, s in zip(gaia_labels, simbad_names):
+
+        if s == "Unknown":
+            continue
+
+        if not g.startswith("Gaia "):
+            continue
+
+        try:
+            source_id = int(g.replace("Gaia ", ""))
+
+            gaia_name_cache[source_id] = s
+            changed = True
+
+        except:
+            pass
+
+    if changed:
+        with open(NAME_CACHE_FILE, "wb") as f:
+            pickle.dump(gaia_name_cache, f)
+
+
+def resolve_names(gaia_labels, simbad_names):
+
+    labels = []
+
+    for g, s in zip(gaia_labels, simbad_names):
+
+        if s != "Unknown":
+            labels.append(s)
+            continue
+
+        if g.startswith("Gaia "):
+
+            try:
+                source_id = int(g.replace("Gaia ", ""))
+
+                if source_id in gaia_name_cache:
+                    labels.append(
+                        gaia_name_cache[source_id]
+                    )
+                    continue
+
+            except:
+                pass
+
+        labels.append("Unknown")
+
+    return labels
+
+def resolve_gaia_label(label):
+    """If `label` is a raw 'Gaia <id>' string (e.g. left over from a
+    paradigm entry the user explicitly typed as a GAIA ID rather than a
+    name), try to resolve it through the name cache and return the real
+    name instead. Falls back to the raw Gaia ID string only if no cached
+    name exists yet — never silently invents a name."""
+    if isinstance(label, str) and label.startswith("Gaia "):
+        try:
+            source_id = int(label.replace("Gaia ", "").strip())
+            if source_id in gaia_name_cache:
+                return gaia_name_cache[source_id]
+        except:
+            pass
+    return label
+
+# R CrB Match
+def find_target_match(ra, dec, max_sep_arcsec=10):
+
+    src = SkyCoord(ra=ra*u.deg, dec=dec*u.deg)
+    sep = src.separation(R_CRB)
+
+    idx = np.argmin(sep)
+    best = sep[idx].arcsec
+
+    return (best < max_sep_arcsec), idx, best
+
+def detect_target(wcs, data, ra, dec):
+    """Match detected sources against R CrB's known sky position, with a
+    fallback for badly overexposed/blooming target stars that DAOStarFinder
+    fails to centroid as a normal point source (sharpness/elongation
+    filtering rejects them, or they merge with nearby sources). Without this,
+    plates where R CrB is genuinely present but heavily saturated were
+    silently miscategorized as "No Target".
+
+    If no detected source matches within the normal tolerance, this computes
+    R CrB's expected pixel position directly from the WCS and checks the raw
+    pixel data there for a bright/saturated blob (a weighted centroid of
+    pixels above the 97th percentile within a 25px search radius).
+
+    Returns (matched_found, idx, sep, has_target, target_fallback):
+      matched_found  - True if a normal detected source matched R CrB
+      idx            - index into the detected sources array (always valid;
+                        only meaningful for marking/labeling if matched_found)
+      sep            - separation in arcsec to that nearest detected source
+      has_target     - matched_found OR fallback detection succeeded
+      target_fallback- {"x":..., "y":...} pixel coords if found via fallback,
+                        else None
+    """
+    matched_found, idx, sep = find_target_match(ra, dec)
+    has_target = matched_found
+    target_fallback = None
+
+    if not matched_found:
+        try:
+            tx, ty = wcs.world_to_pixel_values(R_CRB.ra.deg, R_CRB.dec.deg)
+            tx, ty = float(np.array(tx)), float(np.array(ty))
+            margin = 5
+            if (-margin <= tx < data.shape[1] + margin) and (-margin <= ty < data.shape[0] + margin):
+                search_r = 25
+                x0 = max(int(tx - search_r), 0)
+                x1 = min(int(tx + search_r) + 1, data.shape[1])
+                y0 = max(int(ty - search_r), 0)
+                y1 = min(int(ty + search_r) + 1, data.shape[0])
+                if x1 > x0 and y1 > y0:
+                    local = data[y0:y1, x0:x1]
+                    local_thresh = np.nanpercentile(data, 97)
+                    bright_mask_local = local > local_thresh
+                    if bright_mask_local.any():
+                        ys_idx, xs_idx = np.nonzero(bright_mask_local)
+                        weights = local[ys_idx, xs_idx]
+                        cx_local = np.average(xs_idx, weights=weights)
+                        cy_local = np.average(ys_idx, weights=weights)
+                        target_fallback = {"x": float(x0 + cx_local), "y": float(y0 + cy_local)}
+                        has_target = True
+        except Exception as e:
+            print(f"[TARGET FALLBACK] {e}")
+
+    return matched_found, idx, sep, has_target, target_fallback
+
+# ============================================================
+# Plate database — loaded once; populated/refreshed by run_scan()
+# ============================================================
+
+if PLATE_DB_FILE.exists():
+    print("Loading saved plate database...")
+    with open(PLATE_DB_FILE, "rb") as fp:
+        plate_db = pickle.load(fp)
+else:
+    plate_db = {}
+
+scan_progress = widgets.IntProgress(value=0, min=0, max=max(len(cutouts), 1), description="Scanning:")
+scan_status = widgets.Label(value=f"Loaded {len(plate_db)} cached plates" if plate_db else "Not scanned yet")
+
+DEBUG_N = 30  # Pass plates=cutouts[:DEBUG_N] to run_scan() below to test on a subset.
+
+def run_scan(plates=None):
+    """
+    Scans `plates` (default: all cutouts). Plates already fully cached, with
+    matching paradigm_version AND target_version, are skipped entirely.
+    Plates whose paradigm labels or target-detection logic are stale get a
+    cheap refresh (reopen FITS, no Gaia/SIMBAD/APASS network calls). New/
+    uncached plates get full detection + photometry + catalog crossmatch.
+    """
+    target_plates = plates if plates is not None else cutouts
+    scan_progress.max = max(len(target_plates), 1)
+    scan_progress.value = 0
+
+    for i, f in enumerate(target_plates):
+
+        cached = plate_db.get(str(f))
+        needs_paradigm_refresh = (
+            cached is not None
+            and cached.get("render") is not None
+            and cached["render"].get("paradigm_version", -1) != paradigm_version
+        )
+        needs_target_refresh = (
+            cached is not None
+            and cached.get("render") is not None
+            and cached["render"].get("target_version", -1) != TARGET_DETECTION_VERSION
+        )
+        needs_light_refresh = needs_paradigm_refresh or needs_target_refresh
+
+        if cached is not None and not needs_light_refresh:
+            scan_progress.value = i + 1
+            continue
+
+        if needs_light_refresh:
+            r = cached["render"]
+            hdr = astrofits.getheader(f)
+            wcs = WCS(hdr)
+            ra, dec = wcs.pixel_to_world_values(r["sources"][r["x_col"]], r["sources"][r["y_col"]])
+            ra, dec = np.array(ra, dtype=float), np.array(dec, dtype=float)
+
+            if needs_paradigm_refresh:
+                paradigm_names = match_against_paradigm(ra, dec)
+                r["paradigm_names"] = paradigm_names
+                r["resolved_names"] = [
+                    p if p != "Unknown" else old
+                    for p, old in zip(paradigm_names, r["resolved_names"])
+                ]
+                r["resolved_names"] = [resolve_gaia_label(name) for name in r["resolved_names"]]
+                r["paradigm_version"] = paradigm_version
+
+            if needs_target_refresh:
+                try:
+                    data_for_target = astrofits.getdata(f).astype(float)
+                    data_for_target = np.nan_to_num(data_for_target, nan=np.nanmedian(data_for_target))
+                except Exception as e:
+                    print(f"[TARGET REFRESH LOAD] {f.name}: {e}")
+                    data_for_target = None
+
+                if data_for_target is not None:
+                    matched_found, idx, sep, has_target, target_fallback = detect_target(
+                        wcs, data_for_target, ra, dec
+                    )
+                    r["found"] = matched_found
+                    r["target_idx"] = idx
+                    r["target_fallback"] = target_fallback
+                    r["target_version"] = TARGET_DETECTION_VERSION
+                    plate_db[str(f)]["target"] = has_target
+
+            scan_progress.value = i + 1
+            continue
+
+        scan_status.value = f.name
+
+        try:
+            sources, algorithm, data, data_sub, std, x_col, y_col = detect_sources(f)
+
+            tag = "error"
+            quality = "defective"
+            n = 0
+            has_target = False
+            cached_render = None
+
+            if sources is not None and len(sources) > 0:
+
+                n = len(sources)
+
+                hdr = astrofits.getheader(f)
+                wcs = WCS(hdr)
+
+                ra, dec = wcs.pixel_to_world_values(sources[x_col], sources[y_col])
+                ra = np.array(ra, dtype=float)
+                dec = np.array(dec, dtype=float)
+
+                matched_found, idx, sep, has_target, target_fallback = detect_target(wcs, data, ra, dec)
+                found = matched_found
+
+                sharp = sources["sharpness"] if "sharpness" in sources.colnames else None
+                elong = sources["elongation"] if "elongation" in sources.colnames else None
+
+                bad = 0
+                if sharp is not None:
+                    bad += np.sum(np.array(sharp) < 0.1)
+                if elong is not None:
+                    bad += np.sum(np.array(elong) > 3)
+
+                bad_frac = bad / n
+
+                if bad_frac > 0.5:
+                    tag = "messy"
+                elif n < 10:
+                    tag = "empty"
+                elif n < 100:
+                    tag = "crowded"
+                else:
+                    tag = "rich"
+
+                positions = list(zip(sources[x_col], sources[y_col]))
+                apertures = CircularAperture(positions, r=APERTURE_RADIUS)
+                phot_table = aperture_photometry(data_sub, apertures)
+                flux = np.array(phot_table["aperture_sum"])
+                flux = np.where(flux > 0, flux, np.nan)
+                inst_mag = -2.5 * np.log10(flux)
+
+                gaia_catalog = get_plate_catalog_gaia(wcs, data.shape)
+                apass_catalog = get_plate_catalog_apass(wcs, data.shape)
+
+                src_coords = SkyCoord(ra * u.deg, dec * u.deg)
+                catalog_b = np.full(len(src_coords), np.nan)
+
+                if apass_catalog is not None and len(apass_catalog) > 0:
+                    apass_coords = SkyCoord(apass_catalog["ra"], apass_catalog["dec"], unit="deg")
+                    idx_src, idx_cat, sep2d, _ = search_around_sky(
+                        src_coords, apass_coords, seplimit=5 * u.arcsec
+                    )
+                    for s, c in zip(idx_src, idx_cat):
+                        catalog_b[s] = apass_catalog["b_mag"][c]
+
+                gaia_names = match_detected_sources_gaia(ra, dec, gaia_catalog)
+
+                try:
+                    simbad_names = get_simbad_names(ra, dec)
+                except Exception as e:
+                    print("[SIMBAD ERROR]", e)
+                    simbad_names = ["Unknown"] * len(ra)
+
+                update_name_cache(gaia_names, simbad_names)
+                resolved_names = resolve_names(gaia_names, simbad_names)
+
+                paradigm_names = match_against_paradigm(ra, dec)
+                resolved_names = [
+                    p if p != "Unknown" else r2
+                    for p, r2 in zip(paradigm_names, resolved_names)
+                ]
+                # A paradigm entry may itself be a raw "Gaia <id>" string
+                # (the user typed a GAIA ID instead of a name) — try one
+                # more resolution pass through the name cache before
+                # accepting it for display.
+                resolved_names = [resolve_gaia_label(name) for name in resolved_names]
+
+                plate_errors = detect_plate_errors(data)
+
+                matched_mask = np.array([g != "Unknown" for g in gaia_names]) | np.isfinite(catalog_b)
+                n_matched = int(np.sum(matched_mask))
+
+                quality = classify_plate_quality(plate_errors, n, n_matched)
+
+                cached_render = {
+                    "sources":        sources,
+                    "x_col":          x_col,
+                    "y_col":          y_col,
+                    "inst_mag":       inst_mag,
+                    "catalog_b": catalog_b,
+                    "calib_mask": (np.isfinite(inst_mag) & np.isfinite(catalog_b)),
+                    "gaia_names":     gaia_names,
+                    "simbad_names": simbad_names,
+                    "resolved_names": resolved_names,
+                    "paradigm_names": paradigm_names,
+                    "paradigm_version": paradigm_version,
+                    "found":          found,
+                    "target_idx":     idx,
+                    "target_fallback": target_fallback,
+                    "target_version": TARGET_DETECTION_VERSION,
+                    "errors":         plate_errors,
+                }
+
+                x_all = np.array(cached_render["inst_mag"])
+                y_all = np.array(cached_render["catalog_b"])
+                mask = np.isfinite(x_all) & np.isfinite(y_all)
+                x = x_all[mask]
+                y = y_all[mask]
+
+                if len(x) >= 20:
+                    slope, intercept = np.polyfit(y, x, 1)
+                    cached_render["calibration"] = {"slope": slope, "intercept": intercept, "n_used": len(x)}
+                else:
+                    cached_render["calibration"] = None
+
+        except Exception as e:
+            print(f"[ERROR] {f.name}: {e}")
+            tag = "error"
+            quality = "defective"
+            n = 0
+            has_target = False
+            cached_render = None
+
+        plate_db[str(f)] = {
+            "tag":     tag,
+            "quality": quality,
+            "n":       n,
+            "date":    get_plate_date(f),
+            "target":  has_target,
+            "render":  cached_render,
+        }
+
+        if (i + 1) % 10 == 0:
+            with open(PLATE_DB_FILE, "wb") as fp:
+                pickle.dump(plate_db, fp)
+            print(f"Autosaved {i + 1} plates")
+
+        enrich_previous_plates(plate_db, str(f))
+        scan_progress.value = i + 1
+
+    scan_status.value = "Scan complete"
+    with open(PLATE_DB_FILE, "wb") as fp:
+        pickle.dump(plate_db, fp)
+    print(f"Saved {len(plate_db)} plates")
+    refresh_filter_options()
+    rebuild_dropdown()
+
+
+# ============================================================
+# Shared filtering infrastructure — the paradigm plate picker and the main
+# viewer's Plate dropdown each get their OWN independent Filter + Search
+# widgets now, so choosing a category for one no longer restricts the other.
+# ============================================================
+
+# Paradigm panel's filter/search (controls paradigm_plate_dropdown only)
+category_filter = widgets.Dropdown(
+    options=["all", "ideal", "good_target", "good_no_target", "defective_target", "defective_no_target"],
+    value="all",
+    description="Filter:"
+)
+search_box = widgets.Text(
+    description="Search:",
+    placeholder="filter by filename, e.g. 0012"
+)
+
+# Main viewer's filter/search (controls dropdown only) — fully independent
+main_category_filter = widgets.Dropdown(
+    options=["all", "ideal", "good_target", "good_no_target", "defective_target", "defective_no_target"],
+    value="all",
+    description="Filter:"
+)
+main_search_box = widgets.Text(
+    description="Search:",
+    placeholder="filter by filename, e.g. 0012"
+)
+
+dropdown = widgets.Dropdown(description="Plate:")
+dropdown_status = widgets.Label(value="")
+paradigm_dropdown_status = widgets.Label(value="")
+
+MAX_DROPDOWN_OPTIONS = 500
+
+# Sort key: good_match plates with lots of catalog-matched sources and few
+# defects rise to the top, so a strong paradigm candidate is easy to spot.
+QUALITY_RANK = {"good_match": 0, "fair": 1, "too_many_errors": 2, "defective": 3}
+
+# Human-readable names for each category, shared by both Filter dropdowns
+# and used in each plate's label text in both pickers.
+CATEGORY_DISPLAY = {
+    "ideal": "Ideal Image",
+    "good_target": "Good Image, Target",
+    "good_no_target": "Good Image, No Target",
+    "defective_target": "Defective Image, Target",
+    "defective_no_target": "Defective Image, No Target",
+}
+
+def categorize_plate(meta):
+    """Map a plate_db entry to exactly one of the five Filter categories."""
+    quality = meta.get("quality", "fair")
+    target = bool(meta.get("target", False))
+    is_good = quality in ("good_match", "fair")
+
+    if quality == "good_match" and target:
+        return "ideal"
+    if target:
+        return "good_target" if is_good else "defective_target"
+    else:
+        return "good_no_target" if is_good else "defective_no_target"
+
+def filter_plates(cat_value, query):
+    """Shared filtering logic used by both the paradigm picker and the main
+    viewer dropdown, each passing in its own Filter/Search widget values."""
+
+    query = query.strip().lower()
+    matches = []  # (label, path, sort_key)
+
+    for f_str, meta in plate_db.items():
+        f = Path(f_str)
+
+        cat = categorize_plate(meta)
+        if cat_value != "all" and cat != cat_value:
+            continue
+        if query and query not in f.name.lower():
+            continue
+
+        label = f"{f.name} | {CATEGORY_DISPLAY[cat]} | {meta['n']} sources | {meta['date']}"
+        q_rank = QUALITY_RANK.get(meta.get("quality", "fair"), 1)
+        sort_key = (q_rank, -meta["n"])  # best quality first, then most sources first
+        matches.append((label, f, sort_key))
+
+    # Also offer not-yet-scanned plates (only under "all", since we don't
+    # know their category yet), sorted to the very end.
+    for f in cutouts:
+        if str(f) not in plate_db:
+            if query and query not in f.name.lower():
+                continue
+            if cat_value != "all":
+                continue
+            matches.append((f"{f.name} | not yet scanned", f, (99, 0)))
+
+    matches.sort(key=lambda m: m[2])
+    return [(label, f) for label, f, _ in matches]
+
+def rebuild_paradigm_dropdown(*args):
+    matches = filter_plates(category_filter.value, search_box.value)
+    total_matches = len(matches)
+    options = matches[:MAX_DROPDOWN_OPTIONS]
+    paradigm_plate_dropdown.options = options
+
+    if total_matches > MAX_DROPDOWN_OPTIONS:
+        paradigm_dropdown_status.value = (
+            f"Showing first {MAX_DROPDOWN_OPTIONS} of {total_matches} matches — "
+            f"narrow with Search or the filter above to see the rest."
+        )
+    else:
+        paradigm_dropdown_status.value = f"{total_matches} matches"
+
+def rebuild_main_dropdown(*args):
+    matches = filter_plates(main_category_filter.value, main_search_box.value)
+    total_matches = len(matches)
+    options = matches[:MAX_DROPDOWN_OPTIONS]
+    dropdown.options = options
+
+    if total_matches > MAX_DROPDOWN_OPTIONS:
+        dropdown_status.value = (
+            f"Showing first {MAX_DROPDOWN_OPTIONS} of {total_matches} matches — "
+            f"narrow with Search or the filter above to see the rest."
+        )
+    else:
+        dropdown_status.value = f"{total_matches} matches"
+
+def rebuild_dropdown(*args):
+    """Backward-compatible combined refresh (used by run_scan() and the
+    initial setup below) — updates BOTH pickers, each using its own
+    independent Filter/Search widgets."""
+    rebuild_paradigm_dropdown()
+    rebuild_main_dropdown()
+
+def refresh_filter_options():
+    """Recompute per-category plate counts from plate_db and bake them into
+    BOTH Filter dropdowns' labels, e.g. 'Ideal Image (102)'. The underlying
+    values are unchanged — only the displayed text gains a count — so each
+    dropdown's current selection is preserved independently."""
+
+    counts = {
+        "ideal": 0,
+        "good_target": 0,
+        "good_no_target": 0,
+        "defective_target": 0,
+        "defective_no_target": 0,
+    }
+    total = len(plate_db)
+
+    for meta in plate_db.values():
+        cat = categorize_plate(meta)
+        counts[cat] = counts.get(cat, 0) + 1
+
+    new_options = [
+        (f"all ({total})", "all"),
+        (f"{CATEGORY_DISPLAY['ideal']} ({counts['ideal']})", "ideal"),
+        (f"{CATEGORY_DISPLAY['good_target']} ({counts['good_target']})", "good_target"),
+        (f"{CATEGORY_DISPLAY['good_no_target']} ({counts['good_no_target']})", "good_no_target"),
+        (f"{CATEGORY_DISPLAY['defective_target']} ({counts['defective_target']})", "defective_target"),
+        (f"{CATEGORY_DISPLAY['defective_no_target']} ({counts['defective_no_target']})", "defective_no_target"),
+    ]
+
+    for dd in (category_filter, main_category_filter):
+        cur_val = dd.value
+        dd.options = new_options
+        dd.value = cur_val
+
+category_filter.observe(rebuild_paradigm_dropdown, names="value")
+search_box.observe(rebuild_paradigm_dropdown, names="value")
+main_category_filter.observe(rebuild_main_dropdown, names="value")
+main_search_box.observe(rebuild_main_dropdown, names="value")
+
+refresh_filter_options()  # populate counts immediately from whatever's cached
+
+
+# ============================================================
+# Paradigm plate labeling UI — supports manual add/remove of detections
+# ============================================================
+
+paradigm_plate_dropdown = widgets.Dropdown(description="Paradigm plate:")
+auto_load_btn = widgets.Button(description="Auto-Load Stars", button_style="info")
+clear_plate_btn = widgets.Button(description="Clear Plate", button_style="danger")
+copy_name_btn = widgets.Button(description="Copy Name → Search", button_style="")
+apply_labels_btn = widgets.Button(description="Apply Labels", button_style="success")
+paradigm_status = widgets.Label(value="")
+paradigm_instructions = widgets.HTML(
+    "<small>This Filter/Search only affects the picker below — the main viewer "
+    "further down has its own independent Filter/Search. Selecting a plate here "
+    "automatically opens it for labeling with no markers. 'Auto-Load Stars' runs "
+    "the detection algorithm and adds the found sources as red markers (skipping "
+    "any too close to a marker you already placed). Left-click a red marker to "
+    "label it. Left-click empty space to <b>add</b> a manual (orange) detection "
+    "there. Right-click a marker to <b>remove</b> it from this plate's source "
+    "list. 'Clear Plate' removes every marker and every saved label for this "
+    "plate. 'Copy Name → Search' puts this plate's filename into the Search box "
+    "above. Label as many objects as you like, then click 'Apply Labels' "
+    "once to propagate everything to every plate (including the main "
+    "viewer below).</small>"
+)
+# Plot lives in its own Output widget, separate from status messages below,
+# so that printing a status message (e.g. after a right-click removal) never
+# clears the figure — only paradigm_output gets clear_output() calls now.
+paradigm_plot_output = widgets.Output()
+paradigm_output = widgets.Output()
+paradigm_table_output = widgets.Output()
+
+# xs/ys/manual kept as plain python lists so they can be mutated by add/remove
+_paradigm_state = {
+    "fig": None, "ax": None, "scatter": None, "fits_path": None,
+    "xs": [], "ys": [], "manual": [], "wcs": None, "data": None,
+}
+
+def _nearest_source(x_click, y_click, max_px=PARADIGM_CLICK_PX):
+    xs, ys = _paradigm_state["xs"], _paradigm_state["ys"]
+    if not xs:
+        return None, None
+    xs_arr, ys_arr = np.array(xs), np.array(ys)
+    d = np.hypot(xs_arr - x_click, ys_arr - y_click)
+    j = int(np.argmin(d))
+    return (j, d[j]) if d[j] <= max_px else (None, None)
+
+def _redraw_sources():
+    ax = _paradigm_state["ax"]
+    if ax is None:
+        return
+    if _paradigm_state["scatter"] is not None:
+        _paradigm_state["scatter"].remove()
+
+    xs, ys, manual = _paradigm_state["xs"], _paradigm_state["ys"], _paradigm_state["manual"]
+    colors = ["orange" if m else "red" for m in manual]
+    _paradigm_state["scatter"] = ax.scatter(
+        xs, ys, s=50, facecolors="none", edgecolors=colors, linewidths=1.5
+    )
+    ax.figure.canvas.draw_idle()
+
+def _label_point(x, y, ra, dec):
+    suggestion, src = suggest_name_at(ra, dec)
+    suggested_mode = "GAIA ID" if suggestion.startswith("Gaia ") else "Object ID"
+
+    label_type = widgets.ToggleButtons(
+        options=["Object ID", "GAIA ID"],
+        value=suggested_mode,
+        description="Type:"
+    )
+    label_box = widgets.Text(
+        value=suggestion.replace("Gaia ", "") if suggested_mode == "GAIA ID" else suggestion,
+        description="Label:",
+        placeholder="name, or numeric Gaia source_id"
+    )
+    confirm_btn = widgets.Button(description="Confirm", button_style="success")
+    skip_btn = widgets.Button(description="Skip", button_style="")
+
+    def _confirm(_):
+        raw = label_box.value.strip()
+
+        if label_type.value == "GAIA ID":
+            digits = raw.replace("Gaia", "").strip()
+            if digits.isdigit():
+                final_label = f"Gaia {digits}"
+            else:
+                with paradigm_output:
+                    clear_output(wait=True)
+                    print(f"'{raw}' isn't a numeric Gaia source_id — enter digits only, e.g. 123456789012345.")
+                return
+        else:
+            final_label = raw
+
+        paradigm_db.setdefault(str(_paradigm_state["fits_path"]), [])
+        paradigm_db[str(_paradigm_state["fits_path"])].append({
+            "ra": ra, "dec": dec, "label": final_label, "source": src
+        })
+        save_paradigm_db()
+        bump_paradigm_version()
+
+        # NOTE: no automatic run_scan() here — label as many objects as you
+        # like on this plate, then click "Apply Labels to All Plates" once
+        # to propagate everything in a single full pass.
+        with paradigm_output:
+            clear_output(wait=True)
+            print(f"Saved: {final_label}  (RA={ra:.5f}, Dec={dec:.5f}, suggested via {src})")
+            print("Label more objects on this plate, then click 'Apply Labels' when done.")
+        _refresh_paradigm_table()
+
+    def _skip(_):
+        with paradigm_output:
+            clear_output(wait=True)
+
+    confirm_btn.on_click(_confirm)
+    skip_btn.on_click(_skip)
+
+    with paradigm_output:
+        clear_output(wait=True)
+        print(f"Point at pixel ({x:.1f}, {y:.1f})  ->  RA={ra:.5f}, Dec={dec:.5f}")
+        print(f"Auto-suggested: '{suggestion}' (source: {src})")
+        display(widgets.HBox([label_type, label_box, confirm_btn, skip_btn]))
+
+def _on_plate_click(event):
+    if event.inaxes != _paradigm_state["ax"] or event.xdata is None:
+        return
+
+    wcs = _paradigm_state["wcs"]
+
+    # Right-click: remove nearest marker
+    if event.button == 3:
+        j, dist = _nearest_source(event.xdata, event.ydata)
+        if j is None:
+            with paradigm_output:
+                clear_output(wait=True)
+                print("No marker close enough to remove.")
+            return
+        removed_x, removed_y = _paradigm_state["xs"].pop(j), _paradigm_state["ys"].pop(j)
+        _paradigm_state["manual"].pop(j)
+        ra, dec = wcs.pixel_to_world_values(removed_x, removed_y)
+        ra, dec = float(np.array(ra)), float(np.array(dec))
+
+        # Also drop any paradigm label that was attached to this exact point
+        entries = paradigm_db.get(str(_paradigm_state["fits_path"]), [])
+        entries = [e for e in entries if not (abs(e["ra"] - ra) < 1e-7 and abs(e["dec"] - dec) < 1e-7)]
+        paradigm_db[str(_paradigm_state["fits_path"])] = entries
+        save_paradigm_db()
+        bump_paradigm_version()
+
+        _redraw_sources()
+        with paradigm_output:
+            clear_output(wait=True)
+            print(f"Removed detection at pixel ({removed_x:.1f}, {removed_y:.1f}).")
+        _refresh_paradigm_table()
+        return
+
+    # Left-click: select existing marker, or add a new manual one
+    j, dist = _nearest_source(event.xdata, event.ydata)
+
+    if j is not None:
+        x, y = _paradigm_state["xs"][j], _paradigm_state["ys"][j]
+    else:
+        x, y = float(event.xdata), float(event.ydata)
+        _paradigm_state["xs"].append(x)
+        _paradigm_state["ys"].append(y)
+        _paradigm_state["manual"].append(True)
+        _redraw_sources()
+
+    ra, dec = wcs.pixel_to_world_values(x, y)
+    ra, dec = float(np.array(ra)), float(np.array(dec))
+    _label_point(x, y, ra, dec)
+
+def _refresh_paradigm_table():
+    with paradigm_table_output:
+        clear_output(wait=True)
+        entries = paradigm_db.get(str(_paradigm_state["fits_path"]), [])
+        if not entries:
+            print("No paradigm objects labeled yet for this plate.")
+            return
+        print(f"{len(entries)} labeled objects:")
+        for e in entries:
+            print(f"  {e['label']:25s} RA={e['ra']:.5f} Dec={e['dec']:.5f} ({e['source']})")
+
+def _open_paradigm(_):
+    """Open a plate for labeling with NO markers loaded. Use 'Auto-Load Stars'
+    afterwards to run detection, or click directly on the image to add manual
+    markers. Wired as an observer on paradigm_plate_dropdown's value, so this
+    fires automatically whenever the selected plate changes."""
+    fits_path = paradigm_plate_dropdown.value
+    if fits_path is None:
+        return
+
+    data = astrofits.getdata(fits_path)
+    hdr = astrofits.getheader(fits_path)
+    wcs = WCS(hdr)
+
+    _paradigm_state.update({
+        "fits_path": fits_path, "wcs": wcs, "data": data,
+        "xs": [], "ys": [], "manual": [],
+        "scatter": None,
+    })
+
+    # The figure is drawn into paradigm_plot_output — a dedicated Output widget
+    # that nothing else ever calls clear_output() on, so it persists across
+    # clicks/labels/removals. Only this clear_output (re-opening a plate) wipes it.
+    with paradigm_plot_output:
+        clear_output(wait=True)
+        fig, ax = plt.subplots(figsize=(8, 8))
+        ax.imshow(data, origin="lower", cmap="gray")
+        ax.set_title(f"{fits_path.name}  (left-click=label/add, right-click=remove)")
+        fig.canvas.mpl_connect("button_press_event", _on_plate_click)
+        _paradigm_state["fig"], _paradigm_state["ax"] = fig, ax
+        _redraw_sources()
+        plt.show()
+
+    with paradigm_output:
+        clear_output(wait=True)
+
+    paradigm_status.value = f"Editing {fits_path.name}  (0 markers — click 'Auto-Load Stars' or add manually)"
+    _refresh_paradigm_table()
+
+def _auto_load_stars(_):
+    """Run the detection algorithm on the currently open plate and add the
+    found sources as auto (red) markers, skipping any that land too close
+    to a marker that's already present (manual or auto)."""
+
+    if _paradigm_state["fits_path"] is None:
+        with paradigm_output:
+            clear_output(wait=True)
+            print("No plate is currently open for labeling.")
+        return
+
+    fits_path = _paradigm_state["fits_path"]
+
+    sources, algorithm, data, data_sub, std, x_col, y_col = detect_sources(fits_path)
+
+    if sources is None or len(sources) == 0:
+        with paradigm_output:
+            clear_output(wait=True)
+            print("No sources detected on this plate.")
+        return
+
+    new_xs = np.array(sources[x_col], dtype=float)
+    new_ys = np.array(sources[y_col], dtype=float)
+
+    existing_xs = np.array(_paradigm_state["xs"], dtype=float)
+    existing_ys = np.array(_paradigm_state["ys"], dtype=float)
+
+    added = 0
+    skipped = 0
+
+    for nx, ny in zip(new_xs, new_ys):
+        if len(existing_xs) > 0:
+            d = np.hypot(existing_xs - nx, existing_ys - ny)
+            if d.min() <= PARADIGM_CLICK_PX:
+                skipped += 1
+                continue
+
+        _paradigm_state["xs"].append(float(nx))
+        _paradigm_state["ys"].append(float(ny))
+        _paradigm_state["manual"].append(False)
+        existing_xs = np.array(_paradigm_state["xs"], dtype=float)
+        existing_ys = np.array(_paradigm_state["ys"], dtype=float)
+        added += 1
+
+    _redraw_sources()
+
+    with paradigm_output:
+        clear_output(wait=True)
+        print(f"Auto-loaded {added} star(s) via {algorithm}. "
+              f"Skipped {skipped} too close to an existing marker.")
+
+    paradigm_status.value = (
+        f"Editing {fits_path.name}  ({len(_paradigm_state['xs'])} markers)"
+    )
+    _refresh_paradigm_table()
+
+def _clear_plate(_):
+    """Remove every marker (manual and auto) from the currently open plate's
+    editor state, and every saved paradigm label for this plate."""
+
+    if _paradigm_state["fits_path"] is None:
+        with paradigm_output:
+            clear_output(wait=True)
+            print("No plate is currently open for labeling.")
+        return
+
+    fits_path = _paradigm_state["fits_path"]
+    n_markers = len(_paradigm_state["xs"])
+    n_labels = len(paradigm_db.get(str(fits_path), []))
+
+    _paradigm_state["xs"] = []
+    _paradigm_state["ys"] = []
+    _paradigm_state["manual"] = []
+
+    paradigm_db.pop(str(fits_path), None)
+    save_paradigm_db()
+    bump_paradigm_version()
+
+    _redraw_sources()
+    with paradigm_output:
+        clear_output(wait=True)
+        print(f"Cleared plate: removed {n_markers} marker(s) and {n_labels} saved label(s).")
+
+    paradigm_status.value = f"Editing {fits_path.name}  (0 markers)"
+    _refresh_paradigm_table()
+
+def _copy_name_to_search(_):
+    """Copy the currently open paradigm plate's filename into the Search box."""
+    if _paradigm_state["fits_path"] is None:
+        with paradigm_output:
+            clear_output(wait=True)
+            print("No plate is currently open for labeling.")
+        return
+
+    name = _paradigm_state["fits_path"].name
+    search_box.value = name
+    with paradigm_output:
+        clear_output(wait=True)
+        print(f"Copied '{name}' into the Search box above.")
+
+def _apply_labels(_):
+    """Run a full run_scan() so every saved paradigm label gets propagated
+    across all plates, then refresh both dropdowns/filter counts."""
+    paradigm_status.value = "Applying labels and rescanning all plates..."
+    run_scan()
+    paradigm_status.value = "Done — paradigm labels applied across all plates."
+
+auto_load_btn.on_click(_auto_load_stars)
+clear_plate_btn.on_click(_clear_plate)
+copy_name_btn.on_click(_copy_name_to_search)
+apply_labels_btn.on_click(_apply_labels)
+paradigm_plate_dropdown.observe(_open_paradigm, names="value")
+
+paradigm_panel = widgets.VBox([
+    widgets.HTML("<b>Paradigm plate labeling</b>"),
+    category_filter,
+    search_box,
+    paradigm_plate_dropdown,
+    paradigm_dropdown_status,
+    widgets.HBox([auto_load_btn, clear_plate_btn, copy_name_btn, apply_labels_btn]),
+    paradigm_instructions,
+    paradigm_status,
+    paradigm_plot_output,
+    paradigm_output,
+    paradigm_table_output,
+])
+
+display(paradigm_panel)
+display(widgets.VBox([scan_progress, scan_status]))
+
+# Run the initial scan (uses cache; only new/stale plates do real work)
+run_scan()
+
+# Main viewer
+progress = widgets.IntProgress(value=0, min=0, max=100, description="Progress:")
+status = widgets.Label(value="Ready")
+output = widgets.Output()
+linearity_output = widgets.Output()
+
+def show_plate(change):
+
+    fits_path = dropdown.value
+
+    if fits_path is None:
+        print("No plate selected.")
+        return
+
+    paradigm_ref_indicator.value = bool(paradigm_db.get(str(fits_path)))
+
+    meta = plate_db.get(str(fits_path))
+
+    if meta is None or meta["render"] is None:
+        with output:
+            clear_output(wait=True)
+            print("No data available for this plate.")
+        with linearity_output:
+            clear_output(wait=True)
+        return
+
+    r = meta["render"]
+    data = astrofits.getdata(fits_path)
+
+    progress.value = 50
+    status.value = "Rendering..."
+
+    with output:
+        clear_output(wait=True)
+
+        # "Object ID" already incorporates paradigm-resolved names (with
+        # priority) at scan time — see resolve_gaia_label() above — so a
+        # separate "Paradigm" label mode is no longer needed.
+        if display_mode.value == "Object ID":
+            labels = r["resolved_names"]
+        else:
+            labels = r["gaia_names"]
+
+        if r["found"]:
+            labels = list(labels)
+            labels[r["target_idx"]] = "R CrB"
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+        axes[0].imshow(data, origin="lower", cmap="gray")
+        axes[0].set_title("Raw Plate")
+
+        axes[1].imshow(data, origin="lower", cmap="gray")
+        axes[1].set_title("Source Detections")
+
+        axes[1].scatter(
+            r["sources"][r["x_col"]],
+            r["sources"][r["y_col"]],
+            s=50,
+            facecolors="none",
+            edgecolors="red"
+        )
+
+        if r["found"]:
+            # Normal case: R CrB was successfully picked up as a regular
+            # detected source.
+            axes[1].scatter(
+                r["sources"][r["x_col"]][r["target_idx"]],
+                r["sources"][r["y_col"]][r["target_idx"]],
+                s=120,
+                edgecolors="cyan",
+                facecolors="none"
+            )
+        elif r.get("target_fallback"):
+            # Fallback case: R CrB is present but too overexposed/blooming
+            # to centroid as a normal point source — mark it distinctly so
+            # it's clear this came from the saturated-blob fallback.
+            fb = r["target_fallback"]
+            axes[1].scatter(
+                [fb["x"]], [fb["y"]],
+                s=160, edgecolors="cyan", facecolors="none", linewidths=2
+            )
+            axes[1].text(
+                fb["x"] + 8, fb["y"],
+                "R CrB (saturated)",
+                color="cyan", fontsize=6, va="center",
+                bbox=dict(facecolor="black", alpha=0.6, edgecolor="none", pad=1)
+            )
+
+        for i, (x, y, mag) in enumerate(zip(
+            r["sources"][r["x_col"]],
+            r["sources"][r["y_col"]],
+            r["inst_mag"]
+        )):
+            name = labels[i] if i < len(labels) else "Unknown"
+            if np.isfinite(mag):
+                axes[1].text(
+                    x + 5, y + 5,
+                    f"{name}\n{mag:.2f}",
+                    color="yellow", fontsize=6,
+                    bbox=dict(facecolor="black", alpha=0.5, edgecolor="none", pad=1)
+                )
+
+        if error_toggle.value == "Show Errors":
+            annotate_errors(axes[1], r["errors"])
+
+        plt.tight_layout()
+        plt.show()
+
+        progress.value = 100
+        status.value = f"Done | quality: {meta.get('quality', 'fair')}"
+
+    with linearity_output:
+        clear_output(wait=True)
+
+        calib = r.get("calibration")
+        mask = r["calib_mask"]
+
+        x_lin = np.array(r["inst_mag"])[mask]
+        y_lin = np.array(r["catalog_b"])[mask]
+
+        fig2, ax2 = plt.subplots(figsize=(6, 5))
+        ax2.scatter(y_lin, x_lin, s=20, color="steelblue", alpha=0.7, label="Matched sources")
+
+        if calib is not None and len(y_lin) > 0:
+            y_fit = np.linspace(y_lin.min(), y_lin.max(), 100)
+            x_fit = calib["slope"] * y_fit + calib["intercept"]
+            ax2.plot(y_fit, x_fit, color="red", linewidth=1.5,
+                     label=f"Fit: slope={calib['slope']:.3f}, n={calib['n_used']}")
+            residuals = x_lin - (calib["slope"] * y_lin + calib["intercept"])
+            rms = np.sqrt(np.mean(residuals ** 2))
+            ax2.set_title(f"Linearity Check (RMS = {rms:.3f} mag)")
+        else:
+            ax2.set_title("Linearity Check (not enough APASS matches)")
+
+        ax2.set_xlabel("APASS B magnitude")
+        ax2.set_ylabel("Instrumental magnitude")
+        ax2.invert_yaxis()
+        ax2.legend(fontsize=8)
+        ax2.grid(alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
+
+rebuild_dropdown()
+
+dropdown.observe(show_plate, names="value")
+display_mode.observe(show_plate, names="value")
+error_toggle.observe(show_plate, names="value")
+
+display(widgets.VBox([
+    display_mode,
+    error_toggle,
+    paradigm_ref_indicator,
+    main_category_filter,
+    main_search_box,
+    dropdown,
+    dropdown_status,
+    progress,
+    status,
+    output,
+    linearity_output
+]))
+
+if dropdown.options:
+    dropdown.value = dropdown.options[0][1]

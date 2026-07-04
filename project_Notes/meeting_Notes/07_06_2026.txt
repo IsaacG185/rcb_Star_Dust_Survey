@@ -2,6 +2,7 @@
 
 - Went back and optimized plate download pipeline. R CrB first download : 11hr 35min, R CrB latest download (had to redownload as filters were missing some good plates) : 2hr 15min
 - Went through ~1000 plates manually to pick a good one, found a really good one
+- Loading loop after paradigm plate selection : One SIMBAD query per plate instead of one per source (the big one)
 
 [Pre-Meeting Notes : Questions]
 

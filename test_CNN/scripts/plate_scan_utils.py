@@ -1,15 +1,18 @@
 # plate_scan_utils.py
-# Shared, network-free source-detection and plate-quality logic used by
-# both 02_A_Source_Identification_And_Sorting_By_Algorithm.ipynb and
-# 02_B_PyTorch_Algorithm.ipynb. Keeping this in one file means the two
-# notebooks can never silently disagree about what counts as a "good"
-# plate.
+# Shared, network-free source-detection and plate-quality logic, PLUS the
+# Gaia/SIMBAD/paradigm identity-crossmatch logic from 02_A (network calls,
+# used only when explicitly invoked -- not during prescan()).
 
 from pathlib import Path
 from astropy.io import fits as astrofits
 from astropy.stats import sigma_clipped_stats
+from astropy.coordinates import SkyCoord, match_coordinates_sky
+import astropy.units as u
 from photutils.detection import DAOStarFinder, find_peaks
 from photutils.aperture import CircularAperture, aperture_photometry
+
+from astroquery.gaia import Gaia
+from astroquery.simbad import Simbad
 
 import numpy as np
 from scipy import ndimage
@@ -23,6 +26,7 @@ THRESHOLD_SIGMA = 5.0
 MIN_SOURCES_DAO = 5
 BOX_SIZE = 11
 APERTURE_RADIUS = 5.0
+NAME_MATCH_SEP_ARCSEC = 3.0
 
 
 def detect_sources(fits_path, aperture_radius=APERTURE_RADIUS):
@@ -202,8 +206,7 @@ def detect_plate_errors(data):
 def classify_plate_quality(errors, n_sources, n_matched=None, lim_mag_apass=None, lim_mag_atlas=None,
                             lim_mag_median_apass=None, lim_mag_median_atlas=None):
     """Same logic as 02_A, but the dataset-wide medians are passed in
-    explicitly instead of read from module globals, so this function has
-    no hidden state."""
+    explicitly instead of read from module globals."""
     n_scratches = len(errors["scratches"])
     n_trailing = len(errors["trailing"])
     n_saturation = len(errors["saturation"])
@@ -261,9 +264,8 @@ def annotate_errors(ax, errors):
 
 
 def categorize_plate(meta):
-    """ideal / good_target / good_no_target / defective_target / defective_no_target
-    -- 'target' here has no meaning in 02_B (no R CrB matching), so it is
-    always False; kept only so filter_plates()'s labels stay familiar."""
+    """ideal / good_no_target / defective_no_target -- 'target' has no
+    meaning in 02_B, kept only so filter_plates()'s labels stay familiar."""
     quality = meta.get("quality", "fair")
     if meta.get("human_verdict") == "approved" and quality == "fair":
         quality = "good_match"
@@ -282,3 +284,180 @@ def fair_plate_features(errs, n_sources, lim_mag_apass, lim_mag_atlas, lim_mag_m
         errs.get("saturation_area_fraction", 0.0) * 10.0,
         lim_z, float(np.log1p(n_sources)),
     ], dtype=float)
+
+
+# ---------------------------------------------------------------------
+# Identity crossmatch (Gaia / SIMBAD / paradigm) -- same logic as 02_A,
+# adapted to take cache dicts as explicit arguments instead of module
+# globals, and to take paradigm_marks in 02_B's {x,y,ra,dec,label,source}
+# dict format instead of 02_A's paradigm_db format.
+# ---------------------------------------------------------------------
+
+def get_plate_catalog_gaia(wcs, shape, gaia_cache, radius_deg=0.15):
+    cx, cy = shape[1] / 2, shape[0] / 2
+    ra_c, dec_c = wcs.pixel_to_world_values(cx, cy)
+    ra_c, dec_c = float(np.array(ra_c)), float(np.array(dec_c))
+    key = (round(ra_c, 4), round(dec_c, 4))
+    if key in gaia_cache:
+        return gaia_cache[key]
+    query = f"""
+        SELECT source_id, ra, dec
+        FROM gaiadr3.gaia_source
+        WHERE CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', {ra_c}, {dec_c}, {radius_deg})) = 1
+    """
+    try:
+        job = Gaia.launch_job_async(query)
+        result = job.get_results()
+        if result is None:
+            result = []
+        gaia_cache[key] = result
+        return result
+    except Exception as e:
+        print("[GAIA ERROR]", e)
+        gaia_cache[key] = []
+        return []
+
+
+def get_plate_catalog_simbad(wcs, shape, simbad_cache, radius_deg=0.15):
+    cx, cy = shape[1] / 2, shape[0] / 2
+    ra_c, dec_c = wcs.pixel_to_world_values(cx, cy)
+    ra_c, dec_c = float(np.array(ra_c)), float(np.array(dec_c))
+    key = (round(ra_c, 4), round(dec_c, 4))
+    if key in simbad_cache:
+        return simbad_cache[key]
+    center = SkyCoord(ra_c * u.deg, dec_c * u.deg)
+    try:
+        simbad = Simbad()
+        simbad.TIMEOUT = 60
+        simbad.add_votable_fields("main_id", "ra", "dec")
+        result = simbad.query_region(center, radius=radius_deg * u.deg)
+        if result is None:
+            result = []
+        simbad_cache[key] = result
+        return result
+    except Exception as e:
+        print("[SIMBAD ERROR]", e)
+        simbad_cache[key] = []
+        return []
+
+
+def match_detected_sources_gaia(ra, dec, catalog, max_sep_arcsec=2.5):
+    if catalog is None or len(catalog) == 0:
+        return ["Unknown"] * len(ra)
+    cat_coords = SkyCoord(catalog["ra"], catalog["dec"], unit="deg")
+    src_coords = SkyCoord(ra * u.deg, dec * u.deg)
+    idx, sep, _ = match_coordinates_sky(src_coords, cat_coords)
+    labels = []
+    for j in range(len(src_coords)):
+        if sep[j].arcsec <= max_sep_arcsec:
+            labels.append(f"Gaia {catalog['source_id'][idx[j]]}")
+        else:
+            labels.append("Unknown")
+    return labels
+
+
+def match_detected_sources_simbad(ra, dec, catalog, max_sep_arcsec=5):
+    if catalog is None or len(catalog) == 0:
+        return ["Unknown"] * len(ra)
+    try:
+        cat_coords = SkyCoord(catalog["RA"], catalog["DEC"], unit=(u.hourangle, u.deg))
+    except Exception as e:
+        print("[SIMBAD MATCH]", e)
+        return ["Unknown"] * len(ra)
+    src_coords = SkyCoord(ra * u.deg, dec * u.deg)
+    idx, sep, _ = match_coordinates_sky(src_coords, cat_coords)
+    labels = []
+    for j in range(len(src_coords)):
+        if sep[j].arcsec <= max_sep_arcsec:
+            name = str(catalog["MAIN_ID"][idx[j]])
+            labels.append("Unknown" if name.startswith("Gaia") else name)
+        else:
+            labels.append("Unknown")
+    return labels
+
+
+def match_against_paradigm(ra, dec, paradigm_marks, max_sep_arcsec=NAME_MATCH_SEP_ARCSEC):
+    """paradigm_marks: { plate_path_str: [ {x,y,ra,dec,label,source}, ... ] }
+    -- only entries with a non-empty label and known ra/dec participate."""
+    all_entries = []
+    for entries in paradigm_marks.values():
+        for e in entries:
+            if e.get("label") and e["label"] != "Unknown" and e.get("ra") is not None and e.get("dec") is not None:
+                all_entries.append(e)
+    if not all_entries:
+        return ["Unknown"] * len(ra)
+    cat_coords = SkyCoord([e["ra"] for e in all_entries], [e["dec"] for e in all_entries], unit="deg")
+    src_coords = SkyCoord(ra * u.deg, dec * u.deg)
+    idx, sep, _ = match_coordinates_sky(src_coords, cat_coords)
+    labels = []
+    for j in range(len(src_coords)):
+        if sep[j].arcsec <= max_sep_arcsec:
+            labels.append(all_entries[idx[j]]["label"])
+        else:
+            labels.append("Unknown")
+    return labels
+
+
+def update_name_cache(gaia_labels, simbad_names, gaia_name_cache):
+    changed = False
+    for g, s in zip(gaia_labels, simbad_names):
+        if s == "Unknown" or not g.startswith("Gaia "):
+            continue
+        try:
+            source_id = int(g.replace("Gaia ", ""))
+            gaia_name_cache[source_id] = s
+            changed = True
+        except Exception:
+            pass
+    return changed
+
+
+def resolve_names(gaia_labels, simbad_names, gaia_name_cache):
+    labels = []
+    for g, s in zip(gaia_labels, simbad_names):
+        if s != "Unknown":
+            labels.append(s)
+            continue
+        if g.startswith("Gaia "):
+            try:
+                source_id = int(g.replace("Gaia ", ""))
+                if source_id in gaia_name_cache:
+                    labels.append(gaia_name_cache[source_id])
+                    continue
+            except Exception:
+                pass
+        labels.append("Unknown")
+    return labels
+
+
+def suggest_name_at(ra, dec, max_sep_arcsec=NAME_MATCH_SEP_ARCSEC):
+    """One-off SIMBAD then Gaia lookup at a single sky position -- used only
+    for the interactive paradigm-labeling click (one click = one query is
+    fine here), not for bulk processing."""
+    coord = SkyCoord(ra * u.deg, dec * u.deg)
+    try:
+        simbad = Simbad()
+        simbad.TIMEOUT = 30
+        result = simbad.query_region(coord, radius=max_sep_arcsec * u.arcsec)
+        if result is not None and len(result) > 0:
+            name = str(result[0]["MAIN_ID"])
+            if not name.startswith("Gaia"):
+                return name, "SIMBAD"
+    except Exception as e:
+        print("[SIMBAD lookup]", e)
+    try:
+        job = Gaia.launch_job_async(f"""
+            SELECT TOP 1 source_id, DISTANCE(
+                POINT('ICRS', ra, dec), POINT('ICRS', {ra}, {dec})
+            ) AS dist
+            FROM gaiadr3.gaia_source
+            WHERE CONTAINS(POINT('ICRS', ra, dec),
+                CIRCLE('ICRS', {ra}, {dec}, {(max_sep_arcsec * u.arcsec).to(u.deg).value})) = 1
+            ORDER BY dist ASC
+        """)
+        result = job.get_results()
+        if result is not None and len(result) > 0:
+            return f"Gaia {result[0]['source_id']}", "Gaia"
+    except Exception as e:
+        print("[Gaia lookup]", e)
+    return "Unknown", "none"

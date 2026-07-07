@@ -26,3 +26,7 @@ SAO 84015, AAVSO 1544+28A (SIMBAD)
 
 Cen V854:
 - AKA : V854, V854 Cen, 
+
+Photographic Plates : 
+- Downloaded from DASCH (Digital Access to a Sky Century at Harvard).
+- 20-arcminute-wide .fits files

@@ -6,12 +6,32 @@
 - Initial Photometry algorithm : WCS is functional on plates it seems, but maybe ask?
 - PyTorch algorithm : the UNet itself only ever learns "star vs. not star" from the masks. the identity/name JSONs are a separate output sitting next to the training data, not something the network is trained to predict. 
 - Wanted to focus on training model on object/source detection first ; implemented linearity check (more cutouts downloaded and loaded per plate) later for absolute photometry/aperture photometry
-- Path : Download surrounding cutouts for each cutout for linearity check -> Train model on all stars on these larger concatenated cutouts, sort plates by linearity checks 
-- -> Perform absolute photometry -> Train model for absolute photometry -> Add time-series analysis -> Train on time-series analysis -> Implement CCD analyses in all these categories (like DeepDisc) in conjunction with plate CNN.
-- Construct package for general astro use -> Further RCB analysis (?)
+- PyTorch run : Did 10 epoch run, still didn't converge ; dynamic epochs chose about 51, which took 4 hr 2 min 13 sec. Both lines are now on the same scale and directly comparable, unlike the first run. This training run is good to use as-is. To try squeezing out a bit more performance later, the two easiest levers would be more paradigm-labeled/pseudo-labeled plates (more data reduces that train/val gap) or mild data augmentation, but neither is necessary right now.
+- DeepDisc run : Seems to only use CPU, but ran 50 iterations (epochs) in 23 minutes
+    - initial_DeepDisc_Runs_Loss_Graph.png :
+        Cyan, loss_cls: how accurately the model labels each detected box as star, r_crb, scratch, etc. Going down is good.
+        Orange, loss_box_reg: how accurately the model positions and sizes the bounding boxes. Going down is good.
+        Magenta, loss_rpn_cls: the Region Proposal Network deciding whether a region contains any object at all (object vs background). Going down is good.
+        Yellow, loss_rpn_loc: how accurately the RPN adjusts its initial anchor boxes before passing proposals to the classifier. Going down is good.
+
+- Timeline [Proposed] :
+    - Download surrounding cutouts for each cutout for linearity check
+    - Train model on all stars on these larger concatenated cutouts, sort plates by linearity checks 
+    - Perform absolute photometry
+    - Train model for absolute photometry
+    - Add time-series analysis
+    - Train on time-series analysis
+    - Implement CCD analyses in all these categories (like DeepDisc) in conjunction with plate CNN (Transfer learning, Tan et al. 2018)
+    - Construct package for general astro use
+    - Further RCB analysis (?)
 
 [Pre-Meeting Notes : Questions]
 
-
-
 [Meeting Notes]
+
+- WCS for every plate, except for those that have a solution. Sometimes they are wrong, fair number can be off by arcsec, so might need to adjustment.
+- Once stars are certain, feed each star into aperture photometry, get instrumental magnitudes, match with apass to get sanity check.
+- Saturated vs. unsaturated photometry
+- Focus on APASS stars for paradigm plate selection
+- Invert images in 02_A
+- Pick paradigm plate, plot all stars through APASS.

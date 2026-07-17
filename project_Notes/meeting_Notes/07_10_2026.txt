@@ -1,0 +1,7 @@
+Comparison of stars (subtraction of stars from one another), linearity check, background subtraction
+
+Star test: DS9 load, analysis (image servers, pick one, retrieve)
+
+Get extra stars/extra cutouts from Dr. Clayton for linearity check
+
+Aiming for 0.1 magnitude accuracy

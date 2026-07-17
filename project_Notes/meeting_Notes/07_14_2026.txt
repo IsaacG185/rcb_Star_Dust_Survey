@@ -1,0 +1,12 @@
+[Pre-Meeting Notes : Project Status]
+- V CrA : 7,218 plates
+- Notice that there are a lot more stars in Gaia DR3 / 2MASS than SIMBAD. Ask where to proceed.
+- Detailed the full pipeline better in overleaf.
+
+[Pre-Meeting Notes : Questions]
+- Add Gaia DR3 / 2MASS (?). If not, have other star to pick to do linearity check? How to automate this for all stars, or will just require secondary star selection for all RCBs (?)
+
+[Meeting Notes]
+
+- Will only talk on friday, next week he will have operation.
+- V CrA a little fainter: 9.5 at max

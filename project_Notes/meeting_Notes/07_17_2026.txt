@@ -1,5 +1,26 @@
 [Pre-Meeting Notes : Project Status]
+- Loaded up the plate Dr. Clayton gave me, compared to plates I had. Adjusted test_Simple_Photometry_Clayton.ipynb to get a more robust source idenfitcation and photometry algorithm.
+    - Great photometry pipeline refined in test_Simple_Photometry_Clayton.ipynb. Great initial linearity checks excluding saturated stars
+    - Photometry engine, fully ported from test_Simple_Photometry_Clayton.ipynb notebook: APASS field discovery (radius computed from actual image corners), 
+    Gaia parallax → distance/absolute magnitude, centroid refinement, adaptive apertures, local background, saturation + wings-only FWHM, linearity fit with RMS, 
+    self-derived plate limit (pure diagnostic), and both independent cross-checks (flux-ratio differential photometry, distance-modulus prediction).
+        - Changed from DAOStarFinder to APASS reference + distance modulus subtraction, seems way more productive and efficient.
+
+- Readjusted 02_B_PyTorch_Algorithm.ipynb.
+    - Based on new 02_A_Source_Identification_And_Sorting_By_Algorithm.ipynb.
+
+- Still need to work on DeepDisc but it should function in the same way.
+
+- Once this runs, it should be ready to generalize to other stars. But we can also do time series analyses using the photometry. I'm thinking we do this first and then generalize.
 
 [Pre-Meeting Notes : Questions]
 
+- List of good RCB stars to run / train on / analyze? Got AAVSO list, not sure how many have plates.
+
 [Meeting Notes]
+
+- FWHM : Wings for saturated stars. Method using size of star on plate with FWHM (Schaefer et al.)
+- Next step : Plot all V CrA magnitudes over time, compare to DASCHLAB time series lightcurves.
+- V CrA : 10 - 11 max in DASCHLAB; if fainter than faintest star, tag plate where V CrA is fainter.
+- Next, next step : use 2012 Clayton review paper for star list, tisserand (162 stars). 
+- Run entire pipeline three times, do average and constantly check with manual photometry. Compare Northern and Southern.

@@ -1,17 +1,21 @@
 # plate_scan_utils.py
-# Shared, network-free source-detection and plate-quality logic, PLUS the
-# Gaia/SIMBAD/paradigm identity-crossmatch logic from 02_A (network calls,
-# used only when explicitly invoked -- not during prescan()).
+# Shared, network-free source-detection and plate-quality logic, PLUS
+# Gaia/SIMBAD/paradigm identity-crossmatch and a lightweight APASS
+# linearity check. Gaia and APASS both go through raw VizieR TSV cone
+# searches, matching how 02_A's Cell 3 does it.
 
 from pathlib import Path
+import urllib.request
+import urllib.parse
+
 from astropy.io import fits as astrofits
 from astropy.stats import sigma_clipped_stats
 from astropy.coordinates import SkyCoord, match_coordinates_sky
 import astropy.units as u
 from photutils.detection import DAOStarFinder, find_peaks
 from photutils.aperture import CircularAperture, aperture_photometry
+from photutils.profiles import RadialProfile
 
-from astroquery.gaia import Gaia
 from astroquery.simbad import Simbad
 
 import numpy as np
@@ -27,10 +31,14 @@ MIN_SOURCES_DAO = 5
 BOX_SIZE = 11
 APERTURE_RADIUS = 5.0
 NAME_MATCH_SEP_ARCSEC = 3.0
+GAIA_QUERY_RADIUS_DEG = 0.15
+APASS_QUERY_RADIUS_DEG = 0.15
+APASS_MATCH_SEP_ARCSEC = 5.0
 
 
 def detect_sources(fits_path, aperture_radius=APERTURE_RADIUS):
-    """Identical logic to 02_A Cell 2."""
+    """Identical logic to 02_A Cell 2. sources['aperture_flux'] is used
+    both for pseudo-label training masks and for the linearity check."""
     data = astrofits.getdata(fits_path).astype(float)
     data = np.nan_to_num(data, nan=np.nanmedian(data))
     mean, median, std = sigma_clipped_stats(data, sigma=3.0)
@@ -64,8 +72,8 @@ def detect_sources(fits_path, aperture_radius=APERTURE_RADIUS):
 
 
 def detect_plate_errors(data):
-    """Verbatim from 02_A Cell 3: scratches, trailing stars, saturation,
-    dust, dead zones, edge artifacts. No network calls."""
+    """Verbatim from 02_A: scratches, trailing stars, saturation, dust,
+    dead zones, edge artifacts. No network calls."""
     errors = {
         "scratches": [], "trailing": [], "saturation": [], "dust": [],
         "edge": False, "dead_zone_fraction": 0.0, "saturation_area_fraction": 0.0,
@@ -205,8 +213,11 @@ def detect_plate_errors(data):
 
 def classify_plate_quality(errors, n_sources, n_matched=None, lim_mag_apass=None, lim_mag_atlas=None,
                             lim_mag_median_apass=None, lim_mag_median_atlas=None):
-    """Same logic as 02_A, but the dataset-wide medians are passed in
-    explicitly instead of read from module globals."""
+    """Defect + limiting-magnitude quality gate for 02_B's purposes (is
+    this plate clean enough to trust its detected sources as training
+    data). Deliberately simpler than 02_A's APASS-match-fraction version
+    -- 02_B doesn't run full field photometry, so there's no match
+    fraction to fold in here."""
     n_scratches = len(errors["scratches"])
     n_trailing = len(errors["trailing"])
     n_saturation = len(errors["saturation"])
@@ -264,8 +275,6 @@ def annotate_errors(ax, errors):
 
 
 def categorize_plate(meta):
-    """ideal / good_no_target / defective_no_target -- 'target' has no
-    meaning in 02_B, kept only so filter_plates()'s labels stay familiar."""
     quality = meta.get("quality", "fair")
     if meta.get("human_verdict") == "approved" and quality == "fair":
         quality = "good_match"
@@ -287,35 +296,78 @@ def fair_plate_features(errs, n_sources, lim_mag_apass, lim_mag_atlas, lim_mag_m
 
 
 # ---------------------------------------------------------------------
-# Identity crossmatch (Gaia / SIMBAD / paradigm) -- same logic as 02_A,
-# adapted to take cache dicts as explicit arguments instead of module
-# globals, and to take paradigm_marks in 02_B's {x,y,ra,dec,label,source}
-# dict format instead of 02_A's paradigm_db format.
+# VizieR TSV helpers -- shared by Gaia and APASS queries below.
 # ---------------------------------------------------------------------
 
-def get_plate_catalog_gaia(wcs, shape, gaia_cache, radius_deg=0.15):
+def _vizier_tsv_query(source, ra, dec, radius_arcsec, out_columns, max_rows=2000, timeout=30):
+    params = {
+        "-source": source,
+        "-c": f"{ra} {dec}",
+        "-c.rs": radius_arcsec,
+        "-out": out_columns,
+        "-out.max": max_rows,
+    }
+    url = "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return response.read().decode("utf-8")
+
+def _parse_tsv_rows(raw_text, n_cols, converters):
+    rows = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < n_cols:
+            continue
+        try:
+            row = tuple(conv(p) for conv, p in zip(converters, parts[:n_cols]))
+        except ValueError:
+            continue
+        rows.append(row)
+    if rows and not isinstance(rows[0][0], (int, float)):
+        rows = rows[1:]
+    return rows
+
+def _float_or_nan(s):
+    s = s.strip()
+    return float(s) if s else np.nan
+
+
+# ---------------------------------------------------------------------
+# Identity crossmatch (Gaia / SIMBAD / paradigm)
+# ---------------------------------------------------------------------
+
+def get_plate_catalog_gaia(wcs, shape, gaia_cache, radius_deg=GAIA_QUERY_RADIUS_DEG):
+    """Gaia DR3 stars near the plate center via VizieR TSV (I/355/gaiadr3).
+    Cached rows are (ra, dec, source_id) tuples."""
     cx, cy = shape[1] / 2, shape[0] / 2
     ra_c, dec_c = wcs.pixel_to_world_values(cx, cy)
     ra_c, dec_c = float(np.array(ra_c)), float(np.array(dec_c))
     key = (round(ra_c, 4), round(dec_c, 4))
     if key in gaia_cache:
         return gaia_cache[key]
-    query = f"""
-        SELECT source_id, ra, dec
-        FROM gaiadr3.gaia_source
-        WHERE CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', {ra_c}, {dec_c}, {radius_deg})) = 1
-    """
+    radius_arcsec = radius_deg * 3600.0
     try:
-        job = Gaia.launch_job_async(query)
-        result = job.get_results()
-        if result is None:
-            result = []
-        gaia_cache[key] = result
-        return result
+        raw = _vizier_tsv_query("I/355/gaiadr3", ra_c, dec_c, radius_arcsec, "RA_ICRS,DE_ICRS,Source")
+        rows = _parse_tsv_rows(raw, 3, [float, float, int])
+        gaia_cache[key] = rows
+        return rows
     except Exception as e:
         print("[GAIA ERROR]", e)
         gaia_cache[key] = []
         return []
+
+
+def get_plate_catalog_gaia_point(ra, dec, radius_arcsec=NAME_MATCH_SEP_ARCSEC):
+    try:
+        raw = _vizier_tsv_query("I/355/gaiadr3", ra, dec, radius_arcsec, "Source", max_rows=1)
+        rows = _parse_tsv_rows(raw, 1, [int])
+        return rows[0][0] if rows else None
+    except Exception as e:
+        print("[GAIA POINT ERROR]", e)
+        return None
 
 
 def get_plate_catalog_simbad(wcs, shape, simbad_cache, radius_deg=0.15):
@@ -344,13 +396,16 @@ def get_plate_catalog_simbad(wcs, shape, simbad_cache, radius_deg=0.15):
 def match_detected_sources_gaia(ra, dec, catalog, max_sep_arcsec=2.5):
     if catalog is None or len(catalog) == 0:
         return ["Unknown"] * len(ra)
-    cat_coords = SkyCoord(catalog["ra"], catalog["dec"], unit="deg")
+    cat_ra = np.array([row[0] for row in catalog])
+    cat_dec = np.array([row[1] for row in catalog])
+    cat_id = [row[2] for row in catalog]
+    cat_coords = SkyCoord(cat_ra * u.deg, cat_dec * u.deg)
     src_coords = SkyCoord(ra * u.deg, dec * u.deg)
     idx, sep, _ = match_coordinates_sky(src_coords, cat_coords)
     labels = []
     for j in range(len(src_coords)):
         if sep[j].arcsec <= max_sep_arcsec:
-            labels.append(f"Gaia {catalog['source_id'][idx[j]]}")
+            labels.append(f"Gaia {cat_id[idx[j]]}")
         else:
             labels.append("Unknown")
     return labels
@@ -377,8 +432,6 @@ def match_detected_sources_simbad(ra, dec, catalog, max_sep_arcsec=5):
 
 
 def match_against_paradigm(ra, dec, paradigm_marks, max_sep_arcsec=NAME_MATCH_SEP_ARCSEC):
-    """paradigm_marks: { plate_path_str: [ {x,y,ra,dec,label,source}, ... ] }
-    -- only entries with a non-empty label and known ra/dec participate."""
     all_entries = []
     for entries in paradigm_marks.values():
         for e in entries:
@@ -431,9 +484,6 @@ def resolve_names(gaia_labels, simbad_names, gaia_name_cache):
 
 
 def suggest_name_at(ra, dec, max_sep_arcsec=NAME_MATCH_SEP_ARCSEC):
-    """One-off SIMBAD then Gaia lookup at a single sky position -- used only
-    for the interactive paradigm-labeling click (one click = one query is
-    fine here), not for bulk processing."""
     coord = SkyCoord(ra * u.deg, dec * u.deg)
     try:
         simbad = Simbad()
@@ -446,18 +496,92 @@ def suggest_name_at(ra, dec, max_sep_arcsec=NAME_MATCH_SEP_ARCSEC):
     except Exception as e:
         print("[SIMBAD lookup]", e)
     try:
-        job = Gaia.launch_job_async(f"""
-            SELECT TOP 1 source_id, DISTANCE(
-                POINT('ICRS', ra, dec), POINT('ICRS', {ra}, {dec})
-            ) AS dist
-            FROM gaiadr3.gaia_source
-            WHERE CONTAINS(POINT('ICRS', ra, dec),
-                CIRCLE('ICRS', {ra}, {dec}, {(max_sep_arcsec * u.arcsec).to(u.deg).value})) = 1
-            ORDER BY dist ASC
-        """)
-        result = job.get_results()
-        if result is not None and len(result) > 0:
-            return f"Gaia {result[0]['source_id']}", "Gaia"
+        source_id = get_plate_catalog_gaia_point(ra, dec, radius_arcsec=max_sep_arcsec)
+        if source_id is not None:
+            return f"Gaia {source_id}", "Gaia"
     except Exception as e:
         print("[Gaia lookup]", e)
     return "Unknown", "none"
+
+
+# ---------------------------------------------------------------------
+# Lightweight APASS linearity check -- ported from 02_A's field-wide
+# APASS query + linearity fit, used only by 02_B's optional "Linearity
+# Check" panel. Not run during prescan() or training; this is purely a
+# diagnostic on the algorithm's own detected sources.
+# ---------------------------------------------------------------------
+
+def get_plate_catalog_apass(wcs, shape, apass_cache, radius_deg=APASS_QUERY_RADIUS_DEG):
+    """APASS DR9 stars with a measured B magnitude near the plate center,
+    via VizieR TSV (II/336/apass9). Cached rows are (ra, dec, bmag)
+    tuples."""
+    cx, cy = shape[1] / 2, shape[0] / 2
+    ra_c, dec_c = wcs.pixel_to_world_values(cx, cy)
+    ra_c, dec_c = float(np.array(ra_c)), float(np.array(dec_c))
+    key = (round(ra_c, 4), round(dec_c, 4))
+    if key in apass_cache:
+        return apass_cache[key]
+    radius_arcsec = radius_deg * 3600.0
+    try:
+        raw = _vizier_tsv_query("II/336/apass9", ra_c, dec_c, radius_arcsec, "RAJ2000,DEJ2000,Bmag,e_Bmag")
+        rows = _parse_tsv_rows(raw, 3, [float, float, _float_or_nan])
+        rows = [r for r in rows if not np.isnan(r[2])]
+        apass_cache[key] = rows
+        return rows
+    except Exception as e:
+        print("[APASS ERROR]", e)
+        apass_cache[key] = []
+        return []
+
+
+def match_detected_sources_apass(ra, dec, catalog, max_sep_arcsec=APASS_MATCH_SEP_ARCSEC):
+    """Returns an array of APASS B magnitudes (NaN where no match), same
+    length and order as ra/dec."""
+    n = len(ra)
+    if catalog is None or len(catalog) == 0:
+        return np.full(n, np.nan)
+    cat_ra = np.array([r[0] for r in catalog])
+    cat_dec = np.array([r[1] for r in catalog])
+    cat_bmag = np.array([r[2] for r in catalog])
+    cat_coords = SkyCoord(cat_ra * u.deg, cat_dec * u.deg)
+    src_coords = SkyCoord(np.asarray(ra) * u.deg, np.asarray(dec) * u.deg)
+    idx, sep, _ = match_coordinates_sky(src_coords, cat_coords)
+    result = np.full(n, np.nan)
+    for j in range(n):
+        if sep[j].arcsec <= max_sep_arcsec:
+            result[j] = cat_bmag[idx[j]]
+    return result
+
+
+def compute_linearity_fit(inst_mag, catalog_mag):
+    """Instrumental-vs-catalog linearity fit. Returns
+    {"slope","intercept","rms","n_used"} or None if too few points."""
+    inst_mag = np.asarray(inst_mag)
+    catalog_mag = np.asarray(catalog_mag)
+    mask = np.isfinite(inst_mag) & np.isfinite(catalog_mag)
+    x = catalog_mag[mask]
+    y = inst_mag[mask]
+    if len(x) < 5:
+        return None
+    slope, intercept = np.polyfit(x, y, 1)
+    resid = y - (slope * x + intercept)
+    rms = float(np.sqrt(np.mean(resid ** 2)))
+    return {"slope": float(slope), "intercept": float(intercept), "rms": rms, "n_used": int(len(x))}
+
+def compute_fwhm_for_sources(data, xs, ys, edge_radii=None):
+    """Gaussian-fit FWHM (pixels) for each source, via a radial profile
+    centered on its detected position. No saturation handling here (02_B
+    doesn't run full photometry like 02_A does) -- this is a lightweight
+    per-plate diagnostic, not a calibrated measurement."""
+    if edge_radii is None:
+        edge_radii = np.arange(20)
+    n = len(xs)
+    fwhm = np.full(n, np.nan)
+    for i in range(n):
+        try:
+            rp = RadialProfile(data, (float(xs[i]), float(ys[i])), edge_radii)
+            rp.gaussian_fit
+            fwhm[i] = float(rp.gaussian_fwhm)
+        except Exception:
+            pass
+    return fwhm

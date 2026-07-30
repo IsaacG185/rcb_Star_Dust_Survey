@@ -1,0 +1,56 @@
+# Confirmed RCB stars, ranked by brightness at maximum light (visual Max magnitude)
+# Source: Tables 1 & 2, Spectroscopically Confirmed RCB stars (Milky Way, LMC, SMC)
+# Lower Max = brighter = easier to detect on photographic plates.
+# This is the visual magnitude AT MAXIMUM -- RCB stars fade dramatically during
+# declines, so even 'bright' stars here will be undetectable on some plates.
+#
+# NOTE: transcribed by hand from table images -- spot-check any star you rely on
+# heavily against the original source, especially survey designations
+# (ASAS-RCB-#, EROS2-*-RCB-#, MACHO ###.###.###) which are easy to mistranscribe.
+#
+# NOTE 2: some of these survey designations may not resolve via daschlab's
+# target-name lookup -- any that fail will show as 'Failed to resolve' and be
+# skipped automatically in batch mode, nothing else breaks.
+
+# Milky Way RCB
+# #1  Max mag 5.8
+R CrB
+
+# #2  Max mag 6.5
+RY Sgr
+
+# #3  Max mag 7.0
+V854 Cen
+
+# #4  Max mag 8.7
+XX Cam
+
+# #5  Max mag 9.3
+RS Tel
+
+# #6  Max mag 9.4
+# V CrA
+
+# #7  Max mag 9.5
+SU Tau
+
+# #8  Max mag 9.6
+UW Cen
+
+# #9  Max mag 9.6
+S Aps
+
+# #10  Max mag 10.0
+V581 CrA
+
+# #11  Max mag 10.5
+Y Mus
+
+# #12  Max mag 10.5
+U Aqr
+
+# #13  Max mag 10.6
+V348 Sgr
+
+# #14  Max mag 10.8
+V2552 Oph

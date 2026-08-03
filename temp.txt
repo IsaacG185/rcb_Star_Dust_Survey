@@ -1,788 +1,638 @@
-# RCB Photometric Pipeline Unit Test Validator
-# Validates sorting algorithm performance against synthetic benchmark dataset
+# ============================================================================
+# V CrA — Full Pipeline + DASCH Comparison (single self-contained cell)
+# ============================================================================
 
-import os
-import pickle
-import csv
 from pathlib import Path
 from datetime import datetime
+import shelve
+import time
+import traceback
+import warnings
+warnings.filterwarnings('ignore')
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
-import seaborn as sns
-from astropy.io import fits
+from astropy.io import fits as astrofits
 from astropy.wcs import WCS
-from astropy.stats import sigma_clipped_stats
-from scipy.spatial import KDTree
-from scipy.optimize import curve_fit
-from sklearn.metrics import confusion_matrix, classification_report
+from astropy.coordinates import SkyCoord
+from astropy.time import Time
+from astropy.stats import SigmaClip, sigma_clip
+import astropy.units as u
+from photutils.aperture import (CircularAperture, CircularAnnulus,
+                                 ApertureStats, aperture_photometry)
+from photutils.centroids import centroid_sources, centroid_com
+from photutils.background import Background2D, MedianBackground
+import ipywidgets as widgets
+from IPython.display import display
+import urllib.request
+import urllib.parse
 
 # ============================================================================
-# CONFIGURATION
+# PATHS
 # ============================================================================
-UNIT_TEST_DIR = Path(r"C:\Users\dapur\Downloads\Other\Research\rcb_Star_Dust_Survey\test_CNN\data\unit_Tests")
+V_CRA_DIR = Path(r"C:\Users\dapur\Downloads\Other\Research\rcb_Star_Dust_Survey\test_CNN\data\V_CrA")
+VCRA_CUTOUTS_DIR = V_CRA_DIR / 'cutouts'
 
-# Paths to benchmark data
-FITS_DIR = UNIT_TEST_DIR / 'cutouts'
-ANSWER_KEY_PATH = UNIT_TEST_DIR / 'answer_key.csv'
-LIGHT_CURVE_PATH = UNIT_TEST_DIR / 'answer_key_lightcurve.csv'
-CATALOG_PATH = UNIT_TEST_DIR / 'synthetic_catalog.csv'
+VCRA_RUN_TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
+VCRA_OUTPUT_DIR = V_CRA_DIR / f'run_{VCRA_RUN_TIMESTAMP}'
+VCRA_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Validation thresholds
-MAGNITUDE_TOLERANCE = 0.10  # 10% tolerance in magnitude
-POSITION_TOLERANCE_PIXELS = 5.0  # 5 pixel matching tolerance
+VCRA_CACHE_DIR = V_CRA_DIR / 'algorithm_cache'
+VCRA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-# ============================================================================
-# LOAD BENCHMARK DATA
-# ============================================================================
+VCRA_RESULTS_PATH = VCRA_OUTPUT_DIR / 'vcra_photometry_results.csv'
+VCRA_LIGHTCURVE_PATH = VCRA_OUTPUT_DIR / 'vcra_lightcurve.csv'
+VCRA_REF_PHOTOMETRY_PATH = VCRA_OUTPUT_DIR / 'vcra_reference_photometry.csv'
 
-def load_benchmark_data():
-    """Load all benchmark data files."""
-    print("Loading benchmark data...")
-    
-    # Load answer key
-    answer_key = pd.read_csv(ANSWER_KEY_PATH)
-    print(f"  Loaded answer key: {len(answer_key)} plates")
-    
-    # Load light curve
-    light_curve = pd.read_csv(LIGHT_CURVE_PATH)
-    print(f"  Loaded light curve: {len(light_curve)} measurements")
-    
-    # Load catalog
-    catalog = pd.read_csv(CATALOG_PATH)
-    print(f"  Loaded catalog: {len(catalog)} stars")
-    
-    return answer_key, light_curve, catalog
+print(f"V CrA run output folder: {VCRA_OUTPUT_DIR}")
 
 # ============================================================================
-# SORTING ALGORITHM OUTPUT EXTRACTOR
+# PHOTOMETRY PARAMETERS
+# ============================================================================
+DEFAULT_APERTURE = 6
+ANNULUS_INNER = 15
+ANNULUS_OUTER = 20
+CENTROID_BOX = 21
+CENTROID_MAX_DRIFT = 5
+SIGNIF_THRESHOLD = 5.0
+SATURATION_FRACTION = 0.99
+SATURATION_MIN_PIXELS = 5
+ISOLATION_MIN_SEPARATION = ANNULUS_OUTER + 2
+OUTLIER_SIGMA = 3.0
+REF_STARS_MAX_PER_PLATE = 150
+
+# Quality gating — no image-based defect detection. Instead, trust the
+# calibration fit itself: a plate with a bad quadratic fit (blur, clouds,
+# poor focus, etc.) naturally shows a larger RMS and/or needs fewer stars
+# to pass. This is simpler and more robust than trying to visually classify
+# what's wrong with a plate.
+MIN_REF_STARS = 25          # was 10 — a thin calibration fit is a noisy one
+MAX_CALIBRATION_RMS = 0.5   # starting guess — see the printed RMS
+                             # distribution after the run and tighten this
+                             # toward the ~60-70th percentile if you want a
+                             # cleaner (but smaller) light curve.
+
+VCRA_VERSION = 7  # bumped: removed all image-based defect detection
+                  # (scratch/saturation/dust/vignetting) — it kept
+                  # misfiring in ways that either excluded everything or
+                  # nothing. Replaced with calibration-RMS + reference-star
+                  # count gating (numbers already computed and trusted),
+                  # plus a rolling sigma-clip pass on the finished light
+                  # curve to remove remaining outlier points.
+VCRA_TARGET_COORD = SkyCoord(ra=281.884623417 * u.deg, dec=-38.158974417 * u.deg)
+MIN_APASS_STARS_QUERY = 10
+
+# ============================================================================
+# CACHE — shelve-backed
+# ============================================================================
+VCRA_PLATE_DB_PATH = VCRA_CACHE_DIR / 'plate_db_shelf'
+VCRA_APASS_CACHE_PATH = VCRA_CACHE_DIR / 'apass_cache_shelf'
+
+vcra_plate_db = shelve.open(str(VCRA_PLATE_DB_PATH), flag='c', writeback=False)
+apass_cache = shelve.open(str(VCRA_APASS_CACHE_PATH), flag='c', writeback=False)
+
+print(f"Loaded {len(vcra_plate_db)} cached plate results, {len(apass_cache)} cached APASS field queries")
+
+vcra_cutouts = sorted(VCRA_CUTOUTS_DIR.glob("*.fits"))
+print(f"Found {len(vcra_cutouts)} V CrA plates in {VCRA_CUTOUTS_DIR}")
+
+
+# ============================================================================
+# CORE PHOTOMETRY & CALIBRATION FUNCTIONS
 # ============================================================================
 
-def parse_sorting_algorithm_output():
+def subtract_background_2d(data, box_size=50):
+    try:
+        bkg = Background2D(data, (box_size, box_size), filter_size=(3, 3),
+                            bkg_estimator=MedianBackground())
+        return data - bkg.background, bkg.background_rms
+    except Exception:
+        med = np.nanmedian(data)
+        return data - med, np.full_like(data, np.nanstd(data))
+
+def refine_centroids(data, x, y, box_size=CENTROID_BOX, max_drift=CENTROID_MAX_DRIFT):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) == 0:
+        return x, y
+    try:
+        x_ref, y_ref = centroid_sources(data, x, y, box_size=box_size,
+                                         centroid_func=centroid_com)
+        good = np.isfinite(x_ref) & np.isfinite(y_ref)
+        drift = np.hypot(x_ref - x, y_ref - y)
+        good &= drift < max_drift
+        x_ref[~good] = x[~good]
+        y_ref[~good] = y[~good]
+        return x_ref, y_ref
+    except Exception:
+        return x, y
+
+def filter_isolated_stars(x, y, min_separation=ISOLATION_MIN_SEPARATION):
+    n = len(x)
+    if n < 2:
+        return np.ones(n, dtype=bool)
+    isolated = np.ones(n, dtype=bool)
+    for i in range(n):
+        d = np.hypot(x - x[i], y - y[i])
+        d[i] = np.inf
+        if np.any(d < min_separation):
+            isolated[i] = False
+    return isolated
+
+def measure_aperture_photometry(data, x, y, radius=DEFAULT_APERTURE,
+                                 annulus_inner=ANNULUS_INNER, annulus_outer=ANNULUS_OUTER):
+    n = len(x)
+    if n == 0:
+        return np.array([]), np.array([]), np.array([])
+    positions = list(zip(x, y))
+    aperture = CircularAperture(positions, r=radius)
+    annulus = CircularAnnulus(positions, r_in=annulus_inner, r_out=annulus_outer)
+    ann_stats = ApertureStats(data, annulus, sigma_clip=SigmaClip(sigma=3.0))
+    bkg_median = np.nan_to_num(ann_stats.median, nan=0.0)
+    bkg_std = np.nan_to_num(ann_stats.std, nan=0.0)
+    phot = aperture_photometry(data, aperture)
+    flux = phot['aperture_sum'].value - bkg_median * (np.pi * radius**2)
+    return flux, bkg_median, bkg_std
+
+def detect_saturation(data, x, y, radius=DEFAULT_APERTURE,
+                       sat_fraction=SATURATION_FRACTION, min_pixels=SATURATION_MIN_PIXELS):
+    n = len(x)
+    is_sat = np.zeros(n, dtype=bool)
+    data_max = np.nanmax(data)
+    if data_max <= 0:
+        return is_sat
+    positions = list(zip(x, y))
+    aperture = CircularAperture(positions, r=radius)
+    aperture_masks = aperture.to_mask(method='center')
+    for i in range(n):
+        mask = aperture_masks[i]
+        cut = mask.multiply(data)
+        if cut is None:
+            continue
+        star_pixels = cut[mask.data > 0]
+        if len(star_pixels) == 0:
+            continue
+        near_max = np.sum(star_pixels >= sat_fraction * data_max)
+        is_sat[i] = near_max >= min_pixels
+    return is_sat
+
+def calibrate_photometry(inst_mags, apass_b, outlier_sigma=OUTLIER_SIGMA, min_stars=MIN_REF_STARS):
     """
-    Parse the output files from your sorting algorithm.
-    This function should be customized to match your algorithm's output format.
+    Quadratic calibration fit: instrumental_mag = a*B^2 + b*B + c.
+    Photographic plates have a non-linear ("characteristic curve") response,
+    so a straight-line fit leaves systematic curvature in the residuals.
     """
-    print("\nParsing sorting algorithm outputs...")
-    
-    # Look for algorithm output files in the unit test directory
-    # Customize these paths based on your algorithm's output structure
-    
-    # Example: Look for a plate_manifest.csv or similar output
-    manifest_path = UNIT_TEST_DIR / 'plate_manifest.csv'
-    if manifest_path.exists():
-        print(f"  Found plate_manifest.csv")
-        manifest = pd.read_csv(manifest_path)
-    else:
-        print(f"  Warning: plate_manifest.csv not found in {UNIT_TEST_DIR}")
-        manifest = None
-    
-    # Look for per-plate results (assuming your algorithm saves individual results)
-    # This could be a directory of CSV files or a single summary file
-    results_path = UNIT_TEST_DIR / 'algorithm_results.csv'
-    if results_path.exists():
-        print(f"  Found algorithm_results.csv")
-        algorithm_results = pd.read_csv(results_path)
-    else:
-        print(f"  Warning: algorithm_results.csv not found")
-        print("  Attempting to parse from individual plate outputs...")
-        algorithm_results = parse_individual_plate_outputs()
-    
-    return algorithm_results, manifest
+    mask = np.isfinite(inst_mags) & np.isfinite(apass_b)
+    if mask.sum() < min_stars:
+        return None
+    x = apass_b[mask]
+    y = inst_mags[mask]
+    for _ in range(3):
+        try:
+            coeffs = np.polyfit(x, y, 2)
+            residuals = y - np.polyval(coeffs, x)
+            rms = np.sqrt(np.mean(residuals**2))
+            good = np.abs(residuals) < outlier_sigma * rms
+            if good.sum() < min_stars:
+                break
+            x, y = x[good], y[good]
+        except Exception:
+            return None
+    if len(x) < min_stars:
+        return None
+    coeffs = np.polyfit(x, y, 2)
+    residuals = y - np.polyval(coeffs, x)
+    rms = np.sqrt(np.mean(residuals**2))
+    return {
+        'coeffs': coeffs,
+        'rms': rms,
+        'n_used': len(x),
+        'b_min': float(np.min(x)),
+        'b_max': float(np.max(x)),
+    }
 
-def parse_individual_plate_outputs():
-    """
-    Parse individual plate outputs from the sorting algorithm.
-    Customize this based on how your algorithm saves results.
-    """
-    results = []
-    
-    # Look for output files in the cutouts directory
-    # Assuming algorithm saves files like: utest_00001_PERFECT_results.csv
-    result_files = list(FITS_DIR.glob('*_results.csv'))
-    
-    if result_files:
-        print(f"  Found {len(result_files)} individual result files")
-        for f in result_files:
+def invert_quadratic_calibration(calibration, t_inst_mag):
+    a, b, c = calibration['coeffs']
+    roots = np.roots([a, b, c - t_inst_mag])
+    real_roots = roots[np.abs(roots.imag) < 1e-6].real
+    if len(real_roots) == 0:
+        return None
+    lo, hi = calibration['b_min'], calibration['b_max']
+    in_range = real_roots[(real_roots >= lo - 2) & (real_roots <= hi + 2)]
+    candidates = in_range if len(in_range) > 0 else real_roots
+    best = min(candidates, key=lambda r: abs(np.polyval(calibration['coeffs'], r) - t_inst_mag))
+    return float(best)
+
+
+# ============================================================================
+# LIVE APASS QUERY (real plates have no static catalog; cached by field center)
+# ============================================================================
+
+def query_apass(ra_c, dec_c, radius_arcsec, max_rows=3000):
+    params = {
+        '-source': 'II/336/apass9',
+        '-c': f"{ra_c} {dec_c}",
+        '-c.rs': radius_arcsec,
+        '-out': 'RAJ2000,DEJ2000,Bmag,e_Bmag',
+        '-out.max': max_rows,
+    }
+    url = "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?" + urllib.parse.urlencode(params)
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as response:
+                return response.read().decode('utf-8')
+        except Exception:
+            time.sleep(2 ** attempt)
+    return None
+
+def parse_apass_tsv(text):
+    rows = []
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith('-'):
+            continue
+        parts = line.split('\t')
+        if len(parts) < 4:
+            continue
+        try:
+            ra, dec, bmag, e_bmag = float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])
+            rows.append((ra, dec, bmag, e_bmag))
+        except (ValueError, IndexError):
+            continue
+    if rows and not (0 < rows[0][2] < 25):
+        rows = rows[1:]
+    return rows
+
+def get_field_catalog(ra_c, dec_c, radius_arcsec):
+    key = f"{round(ra_c, 3)}_{round(dec_c, 3)}"
+    if key in apass_cache:
+        return apass_cache[key]
+    raw = query_apass(ra_c, dec_c, radius_arcsec)
+    rows = []
+    if raw:
+        rows = parse_apass_tsv(raw)
+        rows = [r for r in rows if 0 < r[2] < 20 and r[3] < 0.5]
+    apass_cache[key] = rows
+    return rows
+
+
+# ============================================================================
+# PER-PLATE PROCESSING
+# ============================================================================
+
+def get_plate_jd(header):
+    if 'JD-OBS' in header:
+        return float(header['JD-OBS'])
+    if 'MJD-OBS' in header:
+        return float(header['MJD-OBS']) + 2400000.5
+    for key in ('DATE-OBS', 'DATE'):
+        if key in header:
             try:
-                df = pd.read_csv(f)
-                results.append(df)
-            except Exception as e:
-                print(f"    Warning: Could not parse {f.name}: {e}")
-    
-    if results:
-        return pd.concat(results, ignore_index=True)
-    else:
-        # Return empty dataframe with expected columns
-        print("  No individual results found. Creating empty results structure.")
-        return pd.DataFrame(columns=[
-            'filename', 'target_detected', 'target_mag', 'target_x', 'target_y',
-            'num_reference_stars', 'reference_star_mags', 'zeropoint', 'rms_scatter'
-        ])
+                return Time(header[key]).jd
+            except Exception:
+                continue
+    return np.nan
 
-# ============================================================================
-# PLATE-LEVEL VALIDATION
-# ============================================================================
+def process_vcra_plate(fits_path):
+    try:
+        data = astrofits.getdata(fits_path).astype(float)
+        header = astrofits.getheader(fits_path)
+        wcs = WCS(header)
+        jd = get_plate_jd(header)
+        data_sub, bkg_rms = subtract_background_2d(data)
 
-def validate_plate(truth_row, algorithm_result, tolerance=MAGNITUDE_TOLERANCE):
-    """
-    Validate a single plate's analysis against the truth.
-    
-    Returns:
-        dict: Validation results including pass/fail status and metrics
-    """
-    result = {
-        'filename': truth_row['filename'],
-        'error_type': truth_row['error_type'],
-        'target_present_truth': truth_row['target_present'],
-        'target_detectable_truth': truth_row['target_detectable'],
-        'true_magnitude': truth_row['true_target_magnitude'],
-        'expected_magnitude': truth_row['expected_measured_target_magnitude'],
-        'expected_photometric_error': truth_row['photometric_error'],
-        'algorithm_detected_target': False,
-        'algorithm_magnitude': np.nan,
-        'algorithm_photometric_error': np.nan,
-        'magnitude_agreement': np.nan,
-        'magnitude_within_tolerance': False,
-        'detection_correct': False,
-        'plate_passes': False,
-        'rejection_reason': None,
-        'comments': ''
-    }
-    
-    # Check if algorithm detected the target
-    if algorithm_result is not None and not algorithm_result.empty:
-        # Check if algorithm found a target
-        if 'target_detected' in algorithm_result.columns:
-            result['algorithm_detected_target'] = bool(algorithm_result['target_detected'].iloc[0])
-        
-        # Get algorithm magnitude if available
-        if 'target_mag' in algorithm_result.columns and not pd.isna(algorithm_result['target_mag'].iloc[0]):
-            result['algorithm_magnitude'] = algorithm_result['target_mag'].iloc[0]
-        
-        # Get algorithm photometric error if available
-        if 'target_mag_error' in algorithm_result.columns:
-            result['algorithm_photometric_error'] = algorithm_result['target_mag_error'].iloc[0]
-        elif 'photometric_error' in algorithm_result.columns:
-            result['algorithm_photometric_error'] = algorithm_result['photometric_error'].iloc[0]
-    
-    # Determine if target should be detected (present and detectable)
-    target_should_be_detected = (truth_row['target_present'] and truth_row['target_detectable'])
-    
-    # Check detection correctness
-    if target_should_be_detected:
-        result['detection_correct'] = result['algorithm_detected_target']
-    else:
-        # Target should NOT be detected
-        result['detection_correct'] = not result['algorithm_detected_target']
-    
-    # Check magnitude agreement (only if target should be detected and was detected)
-    if target_should_be_detected and result['algorithm_detected_target'] and not pd.isna(result['algorithm_magnitude']):
-        true_mag = truth_row['true_target_magnitude']
-        if not pd.isna(true_mag):
-            diff = abs(result['algorithm_magnitude'] - true_mag)
-            result['magnitude_agreement'] = diff
-            result['magnitude_within_tolerance'] = diff <= tolerance
-    
-    # Determine plate pass/fail
-    # Both conditions must be met:
-    # 1. Detection is correct
-    # 2. If target is present, magnitude is within tolerance
-    if target_should_be_detected:
-        result['plate_passes'] = (result['detection_correct'] and result['magnitude_within_tolerance'])
-    else:
-        result['plate_passes'] = result['detection_correct']
-    
-    # Determine rejection reason if failed
-    if not result['plate_passes']:
-        reasons = []
-        if not result['detection_correct']:
-            if target_should_be_detected:
-                reasons.append('Target not detected but should be')
-            else:
-                reasons.append('Target detected but should not be')
-        if target_should_be_detected and not result['magnitude_within_tolerance']:
-            reasons.append(f'Magnitude off by {result["magnitude_agreement"]:.3f} mag')
-        result['rejection_reason'] = '; '.join(reasons)
-    
-    return result
+        h, w = data.shape
+        ra_c, dec_c = wcs.all_pix2world(w / 2, h / 2, 0)
+        corners_x = [0, w - 1, 0, w - 1]
+        corners_y = [0, 0, h - 1, h - 1]
+        corner_ra, corner_dec = wcs.all_pix2world(corners_x, corners_y, 0)
+        center = SkyCoord(float(ra_c) * u.deg, float(dec_c) * u.deg)
+        corners_sky = SkyCoord(corner_ra * u.deg, corner_dec * u.deg)
+        field_radius_arcsec = center.separation(corners_sky).max().arcsec * 1.05
 
-# ============================================================================
-# LIGHT CURVE VALIDATION
-# ============================================================================
+        apass_stars = get_field_catalog(float(ra_c), float(dec_c), field_radius_arcsec)
+        if len(apass_stars) < MIN_APASS_STARS_QUERY:
+            return _empty_vcra_result(fits_path, jd, 'Too few APASS stars in field')
 
-def validate_light_curve(algorithm_light_curve, truth_light_curve):
-    """
-    Validate the final light curve against the truth.
-    
-    Returns:
-        dict: Validation metrics for the light curve
-    """
-    print("\nValidating light curve...")
-    
-    # If algorithm light curve is None or empty, create placeholder
-    if algorithm_light_curve is None or algorithm_light_curve.empty:
-        print("  Warning: No algorithm light curve provided")
-        algorithm_light_curve = pd.DataFrame(columns=['mjd', 'magnitude', 'magnitude_error'])
-    
-    # Ensure both have MJD columns
-    if 'mjd' not in algorithm_light_curve.columns:
-        print("  Warning: Algorithm light curve missing 'mjd' column")
-        return {'error': 'Invalid light curve format'}
-    
-    # Merge on MJD
-    merged = pd.merge(
-        truth_light_curve,
-        algorithm_light_curve,
-        on='mjd',
-        how='inner',
-        suffixes=('_truth', '_algo')
-    )
-    
-    if len(merged) == 0:
-        print("  Warning: No matching MJD points found between truth and algorithm")
-        return {
-            'n_points_algo': len(algorithm_light_curve),
-            'n_points_truth': len(truth_light_curve),
-            'n_matched': 0,
-            'completeness': 0,
-            'reliability': 0,
-            'mean_magnitude_diff': np.nan,
-            'rms_magnitude_diff': np.nan,
-            'mean_magnitude_error': np.nan
-        }
-    
-    # Calculate metrics
-    n_truth = len(truth_light_curve)
-    n_algo = len(algorithm_light_curve)
-    n_matched = len(merged)
-    
-    # Completeness: fraction of truth points recovered by algorithm
-    completeness = n_matched / n_truth if n_truth > 0 else 0
-    
-    # Reliability: fraction of algorithm points that match truth
-    reliability = n_matched / n_algo if n_algo > 0 else 0
-    
-    # Magnitude differences
-    mag_diffs = merged['magnitude_truth'] - merged['magnitude_algo']
-    mean_diff = np.mean(mag_diffs)
-    rms_diff = np.std(mag_diffs)
-    
-    # Magnitude error analysis
-    if 'magnitude_error_truth' in merged.columns and 'magnitude_error_algo' in merged.columns:
-        error_ratio = merged['magnitude_error_algo'] / merged['magnitude_error_truth']
-        mean_error_ratio = np.mean(error_ratio)
-    else:
-        mean_error_ratio = np.nan
-    
-    metrics = {
-        'n_points_truth': n_truth,
-        'n_points_algo': n_algo,
-        'n_matched': n_matched,
-        'completeness': completeness,
-        'reliability': reliability,
-        'mean_magnitude_diff': mean_diff,
-        'rms_magnitude_diff': rms_diff,
-        'mean_error_ratio': mean_error_ratio,
-        'merged_data': merged
-    }
-    
-    print(f"  Completeness: {completeness:.2%}")
-    print(f"  Reliability: {reliability:.2%}")
-    print(f"  Mean magnitude difference: {mean_diff:.3f} mag")
-    print(f"  RMS magnitude difference: {rms_diff:.3f} mag")
-    
-    return metrics
+        ra = np.array([s[0] for s in apass_stars])
+        dec = np.array([s[1] for s in apass_stars])
+        apass_b = np.array([s[2] for s in apass_stars])
 
-# ============================================================================
-# ANALYSIS FUNCTIONS
-# ============================================================================
+        x, y = wcs.all_world2pix(ra, dec, 0)
+        margin = 20
+        in_frame = (x > margin) & (x < w - margin) & (y > margin) & (y < h - margin)
+        x, y, apass_b = x[in_frame], y[in_frame], apass_b[in_frame]
+        star_ids = np.array([f'APASS_{i:05d}' for i in range(len(x))])
 
-def analyze_by_error_type(validation_results):
-    """Analyze performance by error type."""
-    df = pd.DataFrame(validation_results)
-    
-    # Group by error type
-    summary = df.groupby('error_type').agg({
-        'plate_passes': ['count', 'sum', 'mean'],
-        'detection_correct': 'mean',
-        'magnitude_within_tolerance': 'mean',
-        'magnitude_agreement': ['mean', 'std', 'median']
-    }).round(4)
-    
-    # Flatten column names
-    summary.columns = ['_'.join(col).strip() for col in summary.columns.values]
-    summary = summary.rename(columns={
-        'plate_passes_count': 'total_plates',
-        'plate_passes_sum': 'plates_passed',
-        'plate_passes_mean': 'pass_rate',
-        'detection_correct_mean': 'detection_accuracy',
-        'magnitude_within_tolerance_mean': 'magnitude_accuracy',
-        'magnitude_agreement_mean': 'mean_mag_diff',
-        'magnitude_agreement_std': 'std_mag_diff',
-        'magnitude_agreement_median': 'median_mag_diff'
-    })
-    
-    return summary
+        if len(x) > REF_STARS_MAX_PER_PLATE:
+            keep = np.random.choice(len(x), size=REF_STARS_MAX_PER_PLATE, replace=False)
+            x, y, apass_b, star_ids = x[keep], y[keep], apass_b[keep], star_ids[keep]
 
-def analyze_by_difficulty(validation_results):
-    """Analyze performance by difficulty level."""
-    df = pd.DataFrame(validation_results)
-    
-    # Estimate difficulty based on error type (you can refine this)
-    easy_types = ['PERFECT', 'LOW_NOISE']
-    medium_types = ['HIGH_BACKGROUND', 'BLURRED_PSF', 'VIGNETTING', 'COSMIC_RAYS', 'DUST_ARTIFACTS']
-    hard_types = ['SEVERE_BLUR', 'HEAVY_OPACITY', 'TARGET_CONTAMINATED', 'TARGET_UNDETECTABLE']
-    
-    def classify_difficulty(error_type):
-        if error_type in easy_types:
-            return 'Easy'
-        elif error_type in medium_types:
-            return 'Medium'
-        elif error_type in hard_types:
-            return 'Hard'
-        else:
-            return 'Variable'
-    
-    df['difficulty'] = df['error_type'].apply(classify_difficulty)
-    
-    summary = df.groupby('difficulty').agg({
-        'plate_passes': ['count', 'mean'],
-        'detection_correct': 'mean',
-        'magnitude_agreement': 'mean'
-    }).round(4)
-    
-    summary.columns = ['_'.join(col).strip() for col in summary.columns.values]
-    summary = summary.rename(columns={
-        'plate_passes_count': 'total_plates',
-        'plate_passes_mean': 'pass_rate',
-        'detection_correct_mean': 'detection_accuracy',
-        'magnitude_agreement_mean': 'mean_mag_diff'
-    })
-    
-    return summary
+        if len(x) == 0:
+            return _empty_vcra_result(fits_path, jd, 'No APASS stars in frame')
 
-def create_confusion_matrix(validation_results):
-    """Create confusion matrix for detection."""
-    df = pd.DataFrame(validation_results)
-    
-    # Create binary arrays
-    truth = df['target_present_truth'] & df['target_detectable_truth']
-    predicted = df['algorithm_detected_target']
-    
-    # Calculate confusion matrix
-    cm = confusion_matrix(truth, predicted)
-    
-    # Create classification report
-    report = classification_report(truth, predicted, 
-                                   target_names=['Target Absent', 'Target Present'],
-                                   output_dict=True)
-    
-    return cm, report
+        x_ref, y_ref = refine_centroids(data_sub, x, y)
+        isolated = filter_isolated_stars(x_ref, y_ref)
+        flux, bkg_med, bkg_std = measure_aperture_photometry(data_sub, x_ref, y_ref)
 
-# ============================================================================
-# PLOTTING FUNCTIONS
-# ============================================================================
+        area = np.pi * DEFAULT_APERTURE**2
+        with np.errstate(divide='ignore', invalid='ignore'):
+            snr = np.where(bkg_std > 0, flux / (bkg_std * np.sqrt(area)), 0)
 
-def create_validation_plots(validation_results, light_curve_metrics, truth_light_curve):
-    """Create comprehensive validation plots."""
-    print("\nCreating validation plots...")
-    
-    df = pd.DataFrame(validation_results)
-    fig = plt.figure(figsize=(16, 12))
-    gs = GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
-    
-    # Plot 1: Pass/Fail distribution
-    ax1 = fig.add_subplot(gs[0, 0])
-    pass_counts = df['plate_passes'].value_counts()
-    colors = ['#2ecc71' if k else '#e74c3c' for k in pass_counts.index]
-    ax1.bar(['Pass', 'Fail'], [pass_counts.get(True, 0), pass_counts.get(False, 0)], 
-            color=colors, alpha=0.7)
-    ax1.set_title('Plate Pass/Fail Distribution')
-    ax1.set_ylabel('Number of Plates')
-    ax1.grid(True, alpha=0.3)
-    ax1.text(0.5, -0.15, f"Pass Rate: {pass_counts.get(True, 0)/(len(df))*100:.1f}%", 
-             transform=ax1.transAxes, ha='center', fontsize=12)
-    
-    # Plot 2: Magnitude agreement histogram
-    ax2 = fig.add_subplot(gs[0, 1])
-    valid_mags = df[~df['magnitude_agreement'].isna()]
-    if len(valid_mags) > 0:
-        ax2.hist(valid_mags['magnitude_agreement'], bins=30, color='#3498db', alpha=0.7)
-        ax2.axvline(MAGNITUDE_TOLERANCE, color='red', linestyle='--', 
-                   label=f'Tolerance: {MAGNITUDE_TOLERANCE} mag')
-        ax2.set_xlabel('Magnitude Difference (|Measured - True|)')
-        ax2.set_ylabel('Count')
-        ax2.set_title('Magnitude Agreement')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        # Add statistics
-        mean_diff = valid_mags['magnitude_agreement'].mean()
-        median_diff = valid_mags['magnitude_agreement'].median()
-        ax2.text(0.98, 0.95, f"Mean: {mean_diff:.3f}\nMedian: {median_diff:.3f}", 
-                transform=ax2.transAxes, ha='right', va='top', fontsize=10, 
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    # Plot 3: Detection accuracy by error type
-    ax3 = fig.add_subplot(gs[0, 2])
-    error_summary = df.groupby('error_type').agg({
-        'detection_correct': 'mean',
-        'plate_passes': 'mean'
-    }).sort_values('plate_passes', ascending=True)
-    
-    if len(error_summary) > 0:
-        x = np.arange(len(error_summary))
-        width = 0.35
-        ax3.bar(x - width/2, error_summary['detection_correct'], width, 
-                label='Detection Accuracy', color='#3498db', alpha=0.7)
-        ax3.bar(x + width/2, error_summary['plate_passes'], width, 
-                label='Pass Rate', color='#2ecc71', alpha=0.7)
-        ax3.set_xticks(x)
-        ax3.set_xticklabels(error_summary.index, rotation=45, ha='right')
-        ax3.set_ylabel('Rate')
-        ax3.set_title('Performance by Error Type')
-        ax3.legend(loc='upper left')
-        ax3.grid(True, alpha=0.3)
-        ax3.set_ylim(0, 1)
-    
-    # Plot 4: Light curve comparison
-    ax4 = fig.add_subplot(gs[1, :2])
-    truth_lc = truth_light_curve
-    # Sort by MJD
-    truth_lc = truth_lc.sort_values('mjd')
-    
-    # Plot truth
-    ax4.errorbar(truth_lc['mjd'], truth_lc['magnitude'], 
-                yerr=truth_lc.get('magnitude_error', 0.05),
-                fmt='.', color='black', alpha=0.5, label='True Light Curve', markersize=3)
-    
-    # Plot algorithm results if available
-    if light_curve_metrics and 'merged_data' in light_curve_metrics:
-        merged = light_curve_metrics['merged_data']
-        if len(merged) > 0:
-            merged = merged.sort_values('mjd')
-            ax4.errorbar(merged['mjd'], merged['magnitude_algo'],
-                        yerr=merged.get('magnitude_error_algo', 0.05),
-                        fmt='o', color='#e74c3c', alpha=0.6, 
-                        label='Algorithm Recovery', markersize=4)
-    
-    ax4.set_xlabel('MJD')
-    ax4.set_ylabel('Magnitude')
-    ax4.set_title('Light Curve Comparison')
-    ax4.legend(loc='best')
-    ax4.grid(True, alpha=0.3)
-    ax4.invert_yaxis()
-    
-    # Plot 5: Magnitude difference vs magnitude
-    ax5 = fig.add_subplot(gs[1, 2])
-    if len(valid_mags) > 0:
-        valid_mags = valid_mags.copy()
-        valid_mags['diff_signed'] = valid_mags['expected_magnitude'] - valid_mags['algorithm_magnitude']
-        ax5.scatter(valid_mags['expected_magnitude'], valid_mags['diff_signed'], 
-                   alpha=0.5, c='#3498db', s=10)
-        ax5.axhline(0, color='black', linestyle='-', alpha=0.3)
-        ax5.axhline(MAGNITUDE_TOLERANCE, color='red', linestyle='--', alpha=0.5)
-        ax5.axhline(-MAGNITUDE_TOLERANCE, color='red', linestyle='--', alpha=0.5)
-        ax5.set_xlabel('True Magnitude')
-        ax5.set_ylabel('Measured - True (mag)')
-        ax5.set_title('Magnitude Bias vs Brightness')
-        ax5.grid(True, alpha=0.3)
-        # Add mean bias
-        mean_bias = valid_mags['diff_signed'].mean()
-        std_bias = valid_mags['diff_signed'].std()
-        ax5.text(0.98, 0.95, f"Mean Bias: {mean_bias:.3f}\nStd: {std_bias:.3f}", 
-                transform=ax5.transAxes, ha='right', va='top', fontsize=10,
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    # Plot 6: Confusion Matrix - FIXED VERSION
-    ax6 = fig.add_subplot(gs[2, 0])
-    cm, report = create_confusion_matrix(validation_results)
-    im = ax6.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
-    ax6.set_title('Confusion Matrix')
-    ax6.set_xticks([0, 1])
-    ax6.set_yticks([0, 1])
-    ax6.set_xticklabels(['Absent', 'Present'])
-    ax6.set_yticklabels(['Absent', 'Present'])
-    ax6.set_xlabel('Predicted')
-    ax6.set_ylabel('True')
-    # Add text annotations
-    for i in range(2):
-        for j in range(2):
-            ax6.text(j, i, str(cm[i, j]), ha='center', va='center', 
-                    color='white' if cm[i, j] > cm.max()/2 else 'black')
-    
-    # Add metrics from classification report - FIXED
-    if 'accuracy' in report:
-        # Get the class labels dynamically
-        class_labels = [k for k in report.keys() if k not in ['accuracy', 'macro avg', 'weighted avg']]
-        if len(class_labels) >= 2:
-            # Find the 'Present' class
-            present_class = [cls for cls in class_labels if 'Present' in cls]
-            if present_class:
-                present_class = present_class[0]
-                metrics_text = (f"Accuracy: {report['accuracy']:.3f}\n"
-                               f"Precision: {report[present_class]['precision']:.3f}\n"
-                               f"Recall: {report[present_class]['recall']:.3f}\n"
-                               f"F1: {report[present_class]['f1-score']:.3f}")
-            else:
-                metrics_text = f"Accuracy: {report['accuracy']:.3f}"
-        else:
-            metrics_text = f"Accuracy: {report['accuracy']:.3f}"
-        
-        ax6.text(1.1, 0.5, metrics_text, transform=ax6.transAxes, 
-                fontsize=10, va='center', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    # Plot 7: Pass rate by difficulty
-    ax7 = fig.add_subplot(gs[2, 1])
-    difficulty_summary = analyze_by_difficulty(validation_results)
-    if len(difficulty_summary) > 0:
-        colors = ['#2ecc71', '#f39c12', '#e74c3c']
-        ax7.bar(difficulty_summary.index, difficulty_summary['pass_rate'], 
-                color=colors[:len(difficulty_summary)], alpha=0.7)
-        ax7.set_ylabel('Pass Rate')
-        ax7.set_title('Pass Rate by Difficulty')
-        ax7.grid(True, alpha=0.3)
-        ax7.set_ylim(0, 1)
-        # Add accuracy values on bars
-        for i, (idx, row) in enumerate(difficulty_summary.iterrows()):
-            ax7.text(i, row['pass_rate'] + 0.02, f"{row['pass_rate']:.1%}", 
-                    ha='center', fontsize=9)
-    
-    # Plot 8: Error statistics summary
-    ax8 = fig.add_subplot(gs[2, 2])
-    error_types = df['error_type'].value_counts().head(10)
-    if len(error_types) > 0:
-        ax8.barh(range(len(error_types)), error_types.values, color='#95a5a6', alpha=0.7)
-        ax8.set_yticks(range(len(error_types)))
-        ax8.set_yticklabels(error_types.index)
-        ax8.set_xlabel('Count')
-        ax8.set_title('Top 10 Error Types')
-        ax8.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    # Save figure
-    output_path = UNIT_TEST_DIR / 'validation_plots.png'
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"  Saved validation plots to {output_path}")
-    
-    plt.show()
-    
-    return fig
+        is_sat = detect_saturation(data, x_ref, y_ref)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            inst_mag = np.where(flux > 0, -2.5 * np.log10(np.maximum(flux, 1e-10)), np.nan)
 
-# ============================================================================
-# GENERATE SUMMARY REPORT
-# ============================================================================
+        good_for_fit = (snr >= SIGNIF_THRESHOLD) & np.isfinite(inst_mag) & ~is_sat & isolated
+        calibration = calibrate_photometry(inst_mag[good_for_fit], apass_b[good_for_fit])
+        n_ref_used = calibration['n_used'] if calibration else int(good_for_fit.sum())
 
-def generate_summary_report(validation_results, light_curve_metrics, summary_stats):
-    """Generate a comprehensive summary report."""
-    print("\nGenerating summary report...")
-    
-    df = pd.DataFrame(validation_results)
-    
-    # Create report
-    report_lines = []
-    report_lines.append("=" * 80)
-    report_lines.append("RCB PHOTOMETRIC PIPELINE UNIT TEST SUMMARY")
-    report_lines.append("=" * 80)
-    report_lines.append(f"Test Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    report_lines.append("")
-    
-    # Overall statistics
-    report_lines.append("OVERALL STATISTICS")
-    report_lines.append("-" * 40)
-    total_plates = len(df)
-    passed_plates = df['plate_passes'].sum()
-    pass_rate = passed_plates / total_plates * 100
-    
-    report_lines.append(f"Total plates processed: {total_plates}")
-    report_lines.append(f"Plates passing: {passed_plates}")
-    report_lines.append(f"Pass rate: {pass_rate:.1f}%")
-    report_lines.append("")
-    
-    # Detection statistics
-    detection_correct = df['detection_correct'].sum()
-    detection_rate = detection_correct / total_plates * 100
-    report_lines.append(f"Detection correctness: {detection_correct}/{total_plates} ({detection_rate:.1f}%)")
-    
-    # Magnitude statistics
-    valid_mags = df[~df['magnitude_agreement'].isna()]
-    if len(valid_mags) > 0:
-        mean_diff = valid_mags['magnitude_agreement'].mean()
-        std_diff = valid_mags['magnitude_agreement'].std()
-        mag_accuracy = valid_mags['magnitude_within_tolerance'].sum() / len(valid_mags) * 100
-        report_lines.append(f"Magnitude accuracy (within {MAGNITUDE_TOLERANCE} mag): {mag_accuracy:.1f}%")
-        report_lines.append(f"Mean magnitude difference: {mean_diff:.3f} ± {std_diff:.3f} mag")
-    report_lines.append("")
-    
-    # Light curve statistics
-    if light_curve_metrics and 'error' not in light_curve_metrics:
-        report_lines.append("LIGHT CURVE STATISTICS")
-        report_lines.append("-" * 40)
-        report_lines.append(f"Truth points: {light_curve_metrics.get('n_points_truth', 0)}")
-        report_lines.append(f"Algorithm points: {light_curve_metrics.get('n_points_algo', 0)}")
-        report_lines.append(f"Matched points: {light_curve_metrics.get('n_matched', 0)}")
-        report_lines.append(f"Completeness: {light_curve_metrics.get('completeness', 0):.2%}")
-        report_lines.append(f"Reliability: {light_curve_metrics.get('reliability', 0):.2%}")
-        if 'mean_magnitude_diff' in light_curve_metrics:
-            report_lines.append(f"Mean magnitude offset: {light_curve_metrics['mean_magnitude_diff']:.3f} mag")
-            report_lines.append(f"RMS magnitude scatter: {light_curve_metrics['rms_magnitude_diff']:.3f} mag")
-    report_lines.append("")
-    
-    # Performance by error type
-    report_lines.append("PERFORMANCE BY ERROR TYPE")
-    report_lines.append("-" * 40)
-    error_summary = analyze_by_error_type(validation_results)
-    report_lines.append(error_summary.to_string())
-    report_lines.append("")
-    
-    # Confusion matrix
-    report_lines.append("CONFUSION MATRIX")
-    report_lines.append("-" * 40)
-    cm, _ = create_confusion_matrix(validation_results)
-    report_lines.append(f"True Positive: {cm[1,1]}")
-    report_lines.append(f"True Negative: {cm[0,0]}")
-    report_lines.append(f"False Positive: {cm[0,1]}")
-    report_lines.append(f"False Negative: {cm[1,0]}")
-    report_lines.append("")
-    
-    # Top failures
-    report_lines.append("TOP FAILURE REASONS")
-    report_lines.append("-" * 40)
-    failed = df[~df['plate_passes']]
-    if len(failed) > 0:
-        # Count rejection reasons
-        reasons = failed['rejection_reason'].value_counts().head(10)
-        for reason, count in reasons.items():
-            report_lines.append(f"  {reason}: {count} plates ({count/len(failed)*100:.1f}%)")
-    else:
-        report_lines.append("  No failures!")
-    report_lines.append("")
-    
-    report_lines.append("=" * 80)
-    report_lines.append("END OF REPORT")
-    report_lines.append("=" * 80)
-    
-    # Save report
-    report_text = "\n".join(report_lines)
-    report_path = UNIT_TEST_DIR / 'validation_report.txt'
-    with open(report_path, 'w') as f:
-        f.write(report_text)
-    
-    print(f"  Saved summary report to {report_path}")
-    
-    return report_text
-
-# ============================================================================
-# MAIN VALIDATION FUNCTION
-# ============================================================================
-
-def run_validation():
-    """Main validation function."""
-    print("=" * 80)
-    print("RCB PHOTOMETRIC PIPELINE UNIT TEST VALIDATOR")
-    print("=" * 80)
-    
-    # Load benchmark data
-    answer_key, truth_light_curve, catalog = load_benchmark_data()
-    
-    # Parse algorithm output
-    algorithm_results, manifest = parse_sorting_algorithm_output()
-    
-    # If algorithm_results is None or empty, create placeholder with all detections
-    if algorithm_results is None or algorithm_results.empty:
-        print("\nCreating placeholder algorithm results for testing...")
-        algorithm_results = pd.DataFrame()
-        # Use truth data to create simulated results
-        for idx, row in answer_key.iterrows():
-            detected = row['target_present'] and row['target_detectable']
-            mag = row['true_target_magnitude']
-            # Add small random error
-            if detected and not pd.isna(mag):
-                mag_error = np.random.normal(0, 0.02)
-                mag_meas = mag + mag_error
-            else:
-                mag_meas = np.nan
-            
-            algorithm_results = pd.concat([
-                algorithm_results,
-                pd.DataFrame({
-                    'filename': [row['filename']],
-                    'target_detected': [detected],
-                    'target_mag': [mag_meas],
-                    'target_mag_error': [0.03 + np.random.uniform(0, 0.05)]
+        ref_rows = []
+        for i in range(len(x_ref)):
+            if np.isfinite(inst_mag[i]) and snr[i] >= SIGNIF_THRESHOLD and isolated[i]:
+                ref_rows.append({
+                    'filename': fits_path.name,
+                    'star_id': star_ids[i],
+                    'apass_b_mag': apass_b[i],
+                    'instrumental_mag': inst_mag[i]
                 })
-            ], ignore_index=True)
-    
-    # Validate each plate
-    print("\nValidating individual plates...")
-    validation_results = []
-    
-    for idx, truth_row in answer_key.iterrows():
-        # Find algorithm result for this plate
-        algo_row = algorithm_results[algorithm_results['filename'] == truth_row['filename']]
-        if len(algo_row) == 0:
-            algo_row = pd.DataFrame()  # Empty if not found
-        
-        # Validate plate
-        result = validate_plate(truth_row, algo_row)
-        validation_results.append(result)
-    
-    # Convert to DataFrame for analysis
-    validation_df = pd.DataFrame(validation_results)
-    
-    # Validate light curve
-    light_curve_metrics = validate_light_curve(algorithm_results, truth_light_curve)
-    
-    # Calculate summary statistics
-    summary_stats = {
-        'total_plates': len(validation_df),
-        'passed_plates': validation_df['plate_passes'].sum(),
-        'pass_rate': validation_df['plate_passes'].mean(),
-        'detection_correct': validation_df['detection_correct'].mean(),
-        'magnitude_accuracy': validation_df['magnitude_within_tolerance'].mean() if 'magnitude_within_tolerance' in validation_df.columns else np.nan
+
+        tx, ty = wcs.all_world2pix(VCRA_TARGET_COORD.ra.deg, VCRA_TARGET_COORD.dec.deg, 0)
+        target_detected = False
+        target_mag = np.nan
+        target_mag_error = np.nan
+
+        if margin < tx < w - margin and margin < ty < h - margin:
+            tx_ref, ty_ref = refine_centroids(data_sub, np.array([tx]), np.array([ty]))
+            t_flux, t_bkg_med, t_bkg_std = measure_aperture_photometry(data_sub, tx_ref, ty_ref)
+            t_area = np.pi * DEFAULT_APERTURE**2
+            t_snr = t_flux[0] / (t_bkg_std[0] * np.sqrt(t_area)) if t_bkg_std[0] > 0 else 0
+
+            if t_snr >= SIGNIF_THRESHOLD and t_flux[0] > 0 and calibration is not None:
+                t_inst_mag = -2.5 * np.log10(t_flux[0])
+                inverted = invert_quadratic_calibration(calibration, t_inst_mag)
+                if inverted is not None:
+                    target_mag = inverted
+                    calibration_uncertainty = calibration['rms'] / np.sqrt(max(calibration['n_used'], 1))
+                    target_mag_error = np.sqrt((1.0857 / max(t_snr, 1e-6))**2 + calibration_uncertainty**2)
+                    target_detected = True
+                tx_out, ty_out = float(tx_ref[0]), float(ty_ref[0])
+            else:
+                tx_out, ty_out = float(tx_ref[0]), float(ty_ref[0])
+        else:
+            tx_out, ty_out = np.nan, np.nan
+
+        # Quality gating driven entirely by numbers already computed —
+        # calibration fit quality (RMS) and how many reference stars it
+        # rests on — rather than any image-based defect classification.
+        quality_ok = (
+            calibration is not None and
+            n_ref_used >= MIN_REF_STARS and
+            calibration['rms'] <= MAX_CALIBRATION_RMS and
+            target_detected
+        )
+
+        rejection_reason = None
+        if calibration is None:
+            rejection_reason = 'Calibration failed (insufficient good reference stars)'
+        elif n_ref_used < MIN_REF_STARS:
+            rejection_reason = f'Too few reference stars in fit ({n_ref_used} < {MIN_REF_STARS})'
+        elif calibration['rms'] > MAX_CALIBRATION_RMS:
+            rejection_reason = f'Calibration RMS too high ({calibration["rms"]:.3f} > {MAX_CALIBRATION_RMS})'
+        elif not target_detected:
+            rejection_reason = 'Target not detected'
+
+        result_row = {
+            'filename': fits_path.name,
+            'jd': jd,
+            'target_detected': target_detected,
+            'target_mag': target_mag,
+            'target_mag_error': target_mag_error,
+            'target_x': tx_out,
+            'target_y': ty_out,
+            'num_reference_stars': n_ref_used,
+            'zeropoint': calibration['coeffs'][2] if calibration else np.nan,
+            'rms_scatter': calibration['rms'] if calibration else np.nan,
+            'quality_ok': quality_ok,
+            'rejection_reason': rejection_reason,
+        }
+        return {'result_row': result_row, 'ref_rows': ref_rows, 'calibration': calibration}
+
+    except Exception as e:
+        print(f"Error processing {fits_path.name}: {e}")
+        return _empty_vcra_result(fits_path, np.nan, str(e))
+
+def _empty_vcra_result(fits_path, jd, reason):
+    return {
+        'result_row': {
+            'filename': fits_path.name, 'jd': jd, 'target_detected': False,
+            'target_mag': np.nan, 'target_mag_error': np.nan,
+            'target_x': np.nan, 'target_y': np.nan,
+            'num_reference_stars': 0, 'zeropoint': np.nan,
+            'rms_scatter': np.nan, 'quality_ok': False,
+            'rejection_reason': reason,
+        },
+        'ref_rows': [],
+        'calibration': None,
     }
-    
-    # Print summary
-    print("\n" + "=" * 60)
-    print("VALIDATION SUMMARY")
-    print("=" * 60)
-    print(f"Total plates processed: {summary_stats['total_plates']}")
-    print(f"Plates passing: {summary_stats['passed_plates']}")
-    print(f"Pass rate: {summary_stats['pass_rate']*100:.1f}%")
-    print(f"Detection correctness: {summary_stats['detection_correct']*100:.1f}%")
-    if not pd.isna(summary_stats['magnitude_accuracy']):
-        print(f"Magnitude accuracy: {summary_stats['magnitude_accuracy']*100:.1f}%")
-    print("=" * 60)
-    
-    # Create plots
-    fig = create_validation_plots(validation_results, light_curve_metrics, truth_light_curve)
-    
-    # Generate summary report
-    report = generate_summary_report(validation_results, light_curve_metrics, summary_stats)
-    
-    # Print final verdict
-    print("\n" + "=" * 60)
-    print("FINAL VERDICT")
-    print("=" * 60)
-    if summary_stats['pass_rate'] >= 0.8:
-        print("✅ PASS: Pipeline meets minimum performance threshold (≥80%)")
-        print(f"   Overall pass rate: {summary_stats['pass_rate']*100:.1f}%")
+
+
+# ============================================================================
+# RUN PIPELINE (with progress bar)
+# ============================================================================
+
+progress_bar = widgets.IntProgress(value=0, min=0, max=len(vcra_cutouts), description='Processing:')
+progress_html = widgets.HTML(value="")
+progress_status = widgets.Label(value="Not started")
+display(widgets.VBox([progress_bar, progress_html, progress_status]))
+
+def format_eta(seconds):
+    if seconds is None or seconds != seconds or seconds < 0:
+        return "calculating..."
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:d}:{s:02d}"
+
+def render_progress(n_done, total, start_time):
+    elapsed = time.monotonic() - start_time
+    pct = (n_done / total * 100) if total else 0
+    rate = (n_done / elapsed) if elapsed > 0 and n_done > 0 else 0
+    remaining = ((total - n_done) / rate) if rate > 0 else None
+    progress_bar.value = n_done
+    progress_html.value = (
+        f"<div style='font-family: monospace; font-size: 13px;'>"
+        f"<b>{pct:5.1f}%</b> &nbsp; {n_done:,} / {total:,} plates &nbsp;|&nbsp; "
+        f"{rate:.2f} plates/sec &nbsp;|&nbsp; "
+        f"Elapsed {format_eta(elapsed)} &nbsp;|&nbsp; ETA {format_eta(remaining)}"
+        f"</div>"
+    )
+
+def run_vcra_pipeline(force_reprocess=False):
+    global vcra_plate_db
+    total = max(len(vcra_cutouts), 1)
+    progress_bar.max = total
+    progress_bar.value = 0
+    start = time.monotonic()
+    last_render = 0.0
+    n_errors = 0
+
+    for i, f in enumerate(vcra_cutouts):
+        key = str(f)
+        cached = vcra_plate_db.get(key)
+        if not force_reprocess and cached and cached.get('_version', 0) == VCRA_VERSION:
+            pass
+        else:
+            progress_status.value = f"Processing: {f.name}"
+            out = process_vcra_plate(f)
+            if out['result_row'].get('num_reference_stars', 0) == 0 and out['calibration'] is None:
+                n_errors += 1
+            out['_version'] = VCRA_VERSION
+            vcra_plate_db[key] = out
+
+        now = time.monotonic()
+        if now - last_render > 0.15 or (i + 1) == total:
+            render_progress(i + 1, total, start)
+            last_render = now
+
+        if (i + 1) % 50 == 0:
+            vcra_plate_db.sync()
+
+    vcra_plate_db.sync()
+    progress_status.value = f"Done. {len(vcra_plate_db)} plates in cache ({n_errors} with no usable reference stars)."
+    print(progress_status.value)
+    return _save_vcra_outputs()
+
+def _save_vcra_outputs():
+    result_rows, ref_rows_all = [], []
+    for f_str in vcra_plate_db.keys():
+        out = vcra_plate_db[f_str]
+        if out is None:
+            continue
+        result_rows.append(out['result_row'])
+        ref_rows_all.extend(out['ref_rows'])
+
+    results_df = pd.DataFrame(result_rows).sort_values('jd').reset_index(drop=True)
+    results_df.to_csv(VCRA_RESULTS_PATH, index=False)
+    print(f"Saved {VCRA_RESULTS_PATH.name} ({len(results_df)} plates)")
+
+    ref_df = pd.DataFrame(ref_rows_all)
+    ref_df.to_csv(VCRA_REF_PHOTOMETRY_PATH, index=False)
+    print(f"Saved {VCRA_REF_PHOTOMETRY_PATH.name} ({len(ref_df)} reference measurements)")
+
+    lc_df = results_df[results_df['quality_ok']].copy()
+    lc_df = lc_df.rename(columns={'target_mag': 'magnitude', 'target_mag_error': 'magnitude_error'})
+    lc_df = lc_df[['jd', 'magnitude', 'magnitude_error']].dropna().sort_values('jd').reset_index(drop=True)
+
+    n_before_clip = len(lc_df)
+    # Rolling local sigma-clip: catches remaining single-point outliers
+    # relative to their neighbors in time, without needing to know WHY a
+    # point is bad — a standard, simple final cleanup pass.
+    if len(lc_df) > 20:
+        window = 15
+        rolling_med = lc_df['magnitude'].rolling(window, center=True, min_periods=5).median()
+        residual = lc_df['magnitude'] - rolling_med
+        clipped = sigma_clip(residual, sigma=4, maxiters=3)
+        lc_df = lc_df[~clipped.mask].reset_index(drop=True)
+    n_after_clip = len(lc_df)
+
+    lc_df.to_csv(VCRA_LIGHTCURVE_PATH, index=False)
+    print(f"Saved {VCRA_LIGHTCURVE_PATH.name} ({n_after_clip} light curve points, "
+          f"{n_before_clip - n_after_clip} removed by sigma-clip)")
+
+    return results_df, ref_df, lc_df
+
+vcra_results_df = pd.DataFrame()
+vcra_ref_df = pd.DataFrame()
+vcra_lc_df = pd.DataFrame()
+
+try:
+    vcra_results_df, vcra_ref_df, vcra_lc_df = run_vcra_pipeline(force_reprocess=False)
+except Exception as e:
+    print(f"\n❌ ERROR: run_vcra_pipeline failed: {e}")
+    traceback.print_exc()
+finally:
+    vcra_plate_db.sync()
+    apass_cache.sync()
+
+
+# ============================================================================
+# CALIBRATION RMS SELF-CHECK — use this to tighten MAX_CALIBRATION_RMS
+# ============================================================================
+if len(vcra_results_df) > 0 and 'rms_scatter' in vcra_results_df.columns:
+    rms_vals = vcra_results_df['rms_scatter'].dropna()
+    if len(rms_vals) > 0:
+        print("\n" + "=" * 60)
+        print("CALIBRATION RMS DISTRIBUTION")
+        print("=" * 60)
+        print(rms_vals.describe(percentiles=[.25, .5, .6, .7, .75, .9]))
+        print(f"\nCurrent MAX_CALIBRATION_RMS = {MAX_CALIBRATION_RMS} "
+              f"-> {(rms_vals <= MAX_CALIBRATION_RMS).sum()} / {len(rms_vals)} plates pass this gate alone")
+        print("If the light curve still looks too scattered, tighten "
+              "MAX_CALIBRATION_RMS toward the ~50th-60th percentile above and rerun.")
+
+
+# ============================================================================
+# DASCH LIGHT CURVE (independent reference, for comparison)
+# NOTE: kept fully raw per request — only NaN/inf values are dropped.
+# ============================================================================
+
+dasch_jd, dasch_mag, dasch_mag_err = None, None, None
+try:
+    from daschlab import Session
+
+    print("\nFetching DASCH reference light curve...")
+    sess = Session("V_CrA")
+    sess.select_target("V CrA")
+    sess.select_refcat("apass")
+    lc = sess.lightcurve(0)
+
+    dasch_jd_raw = np.asarray(lc["time"].jd)
+    dasch_mag_raw = np.asarray(lc["magcal_magdep"].value)
+
+    if "magcal_local_rms" in lc.colnames:
+        dasch_err_raw = np.asarray(lc["magcal_local_rms"].value)
     else:
-        print("❌ FAIL: Pipeline does not meet minimum performance threshold (≥80%)")
-        print(f"   Overall pass rate: {summary_stats['pass_rate']*100:.1f}%")
-    
-    # Save results
-    validation_df.to_csv(UNIT_TEST_DIR / 'validation_detailed_results.csv', index=False)
-    print(f"\nDetailed validation results saved to: {UNIT_TEST_DIR / 'validation_detailed_results.csv'}")
-    
-    return validation_df, light_curve_metrics, summary_stats
+        print("Warning: 'magcal_local_rms' column not found — error bars unavailable")
+        dasch_err_raw = np.full_like(dasch_mag_raw, np.nan)
 
-# ============================================================================
-# RUN VALIDATION
-# ============================================================================
+    good = np.isfinite(dasch_jd_raw) & np.isfinite(dasch_mag_raw)
+    dasch_jd, dasch_mag = dasch_jd_raw[good], dasch_mag_raw[good]
+    dasch_mag_err = dasch_err_raw[good]
+    print(f"DASCH light curve (raw): {len(dasch_jd)} points "
+          f"({np.sum(np.isfinite(dasch_mag_err))} with error bars)")
+except Exception as e:
+    print(f"Warning: could not fetch DASCH light curve ({e})")
 
-if __name__ == "__main__":
-    validation_results, light_curve_metrics, summary_stats = run_validation()
+# COMBINED COMPARISON PLOT
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 11), sharex=True)
+
+if len(vcra_lc_df) > 0:
+    ax1.errorbar(vcra_lc_df['jd'], vcra_lc_df['magnitude'], yerr=vcra_lc_df['magnitude_error'],
+                 fmt='o', color='#3498db', markersize=4,
+                 ecolor='#ef00ff', elinewidth=1.0, capsize=1.5, capthick=0.6,
+                 alpha=0.9, markeredgewidth=0)
+else:
+    ax1.text(0.5, 0.5, 'No quality-passing plates', ha='center', va='center', transform=ax1.transAxes)
+ax1.invert_yaxis()
+ax1.set_ylabel('B Magnitude')
+ax1.set_title(f'This Pipeline — V CrA Light Curve ({len(vcra_lc_df)} points)')
+ax1.grid(True, alpha=0.3)
+
+if dasch_jd is not None and len(dasch_jd) > 0:
+    ax2.errorbar(dasch_jd, dasch_mag, yerr=dasch_mag_err,
+                 fmt='o', color='black', markersize=3,
+                 ecolor='#e74c3c', elinewidth=0.6, capsize=1.2, capthick=0.5,
+                 alpha=0.85, markeredgewidth=0)
+else:
+    ax2.text(0.5, 0.5, 'DASCH light curve unavailable', ha='center', va='center', transform=ax2.transAxes)
+ax2.invert_yaxis()
+ax2.set_xlabel('Julian Date')
+ax2.set_ylabel('Calibrated Magnitude')
+ax2.set_title(f'DASCH Reference Light Curve of V CrA (raw)'
+              f'{f" ({len(dasch_jd)} points)" if dasch_jd is not None else ""}')
+ax2.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()

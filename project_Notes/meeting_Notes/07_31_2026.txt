@@ -1,0 +1,1 @@
+- DASCH also gives error bars; add these (0.1 mag error on average)

@@ -1,5 +1,5 @@
 # Confirmed RCB stars, ranked by brightness at maximum light (visual Max magnitude)
-# Source: Tables 1 & 2, Spectroscopically Confirmed RCB stars (Milky Way, LMC, SMC)
+# Source: Clayton 2012a, Spectroscopically Confirmed RCB stars (Milky Way, LMC, SMC)
 # Lower Max = brighter = easier to detect on photographic plates.
 # This is the visual magnitude AT MAXIMUM -- RCB stars fade dramatically during
 # declines, so even 'bright' stars here will be undetectable on some plates.

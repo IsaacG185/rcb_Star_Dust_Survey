@@ -1,0 +1,9 @@
+R CrB : SISaP and DASCH
+V348_Sgr : SISaP
+V581_CrA : DASCH
+XX_CAM : DASCH
+Y_MUS : DASCH
+
+Check : SU Tau
+Check : UW Cen
+Check : V2552_Oph

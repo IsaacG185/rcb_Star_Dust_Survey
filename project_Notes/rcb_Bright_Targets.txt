@@ -29,7 +29,7 @@ XX Cam
 RS Tel
 
 # #6  Max mag 9.4
-# V CrA
+V CrA
 
 # #7  Max mag 9.5
 SU Tau

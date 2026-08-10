@@ -1,12 +1,12 @@
 - Get plates where star isn't visible; get plate limits (faintest star on a plate)
 - Continue to get uncertainty within 0.1 mag
-- Reread the Tang paper on DASCH photometry
+- [DONE] Reread the Tang paper on DASCH photometry
 - Compare DASCH to my light curve; get the individual plates, see which are missing in mine but are in DASCH, vice versa.
 - [DONE] Give him a list of times during the school year that work best for meetings.
-- Presentation : Context, DASCH, results, future plans
+- [DONE] Presentation : Context, DASCH, results, future plans
 - [DONE] Have presentation draft on Friday.
 - [DONE] In Overleaf, make sure to include in intro (DASCH and RCB).
-- Then, AI stuff.
+- [DONE] Then, AI stuff.
 - If don't hear back for email, tell Dr. Clayton.
 
 - In photometry : do comparison on DASCH after processing.

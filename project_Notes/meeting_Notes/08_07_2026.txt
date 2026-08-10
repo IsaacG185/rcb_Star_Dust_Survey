@@ -1,0 +1,14 @@
+SExtractor : not circular, outline around star (isophotal magnitude), we use photutils
+WCSTools : RA and Dec to WCS
+IRAF's CCMAP task : fits a more refined coordinate model, called a TNX solution, which also accounts for optical distortion
+Reference catalog is Kepler Input Catalog (KIC), GSC, and AAVSO
+
+Solutions to some of the issues: 
+
+Blended stars : FWHM, compare to KIC, calculate if unreliable
+Plate defects : distinguishes real stars from junk by comparing several shape-related measurements from SExtractor (blur width, ellipticity, 
+position angle [the compass-like direction that oval is tilted], and total light detected) for confirmed real stars versus everything else, then statistically flags outliers as likely defects.
+Local brightness correction : we did this in SISaP
+
+Things to try : 
+SExtractor, isohpotal magnitude measurements rather than fixed aperture

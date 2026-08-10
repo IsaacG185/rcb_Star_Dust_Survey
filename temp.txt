@@ -1,0 +1,372 @@
+# 02_B_DASCH_Replica.ipynb - Cell 2: Run on synthetic unit test benchmark
+
+import subprocess
+import shelve
+import shutil
+import time
+import tempfile
+import traceback
+import warnings
+warnings.filterwarnings('ignore')
+
+import numpy as np
+import pandas as pd
+from astropy.io import fits as astrofits
+from astropy.wcs import WCS
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+from IPython.display import display
+import ipywidgets as widgets
+
+UNIT_TEST_DIR = Path("/mnt/c/Users/dapur/Downloads/Other/Research/rcb_Star_Dust_Survey/test_CNN/data/unit_Tests")
+CUTOUTS_DIR = UNIT_TEST_DIR / 'cutouts'
+CATALOG_PATH = UNIT_TEST_DIR / 'synthetic_catalog.csv'
+
+RUN_TIMESTAMP = time.strftime('%Y%m%d_%H%M%S')
+OUTPUT_DIR = UNIT_TEST_DIR / f'test_Algorithm_{RUN_TIMESTAMP}'
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+CACHE_DIR = UNIT_TEST_DIR / 'algorithm_cache_02B'
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+RESULTS_PATH = OUTPUT_DIR / 'algorithm_photometry_results.csv'
+LIGHTCURVE_PATH = OUTPUT_DIR / 'algorithm_lightcurve.csv'
+REF_PHOTOMETRY_PATH = OUTPUT_DIR / 'algorithm_reference_photometry.csv'
+
+print(f"Output folder: {OUTPUT_DIR}")
+
+MATCH_RADIUS_PX = 5.0
+ISOLATION_MIN_SEPARATION = 20
+REF_STARS_MAX_PER_PLATE = 150
+MIN_REF_STARS = 25
+LOCAL_HALF_WINDOW = 1.5
+MIN_REF_STARS_LOCAL = 8
+LOCAL_WINDOW_GROWTH = 1.6
+MIN_ABS_LOCAL_SLOPE = 0.3
+MAX_CALIBRATION_RMS = 0.3
+
+PIPELINE_VERSION = 3
+
+catalog = pd.read_csv(CATALOG_PATH)
+target_row = catalog[catalog['is_target'] == True].iloc[0]
+TARGET_COORD = SkyCoord(ra=target_row['ra'] * u.deg, dec=target_row['dec'] * u.deg)
+ref_catalog = catalog[(catalog['is_target'] == False) & (catalog['is_phantom'] == False)].copy()
+print(f"Loaded catalog: {len(catalog)} stars ({len(ref_catalog)} non-phantom reference candidates)")
+
+cutouts = sorted(CUTOUTS_DIR.glob('*.fits'))
+print(f"Found {len(cutouts)} plates")
+
+if CACHE_DIR.exists():
+    shutil.rmtree(CACHE_DIR)
+CACHE_DIR.mkdir(parents=True)
+plate_db = shelve.open(str(CACHE_DIR / 'plate_db_shelf'), flag='c', writeback=False)
+print(f"Cache cleared, starting fresh")
+
+def run_sextractor(fits_path, workdir):
+    workdir = Path(workdir)
+    catalog_out = workdir / f"{fits_path.stem}.cat"
+    cmd = [
+        SEXTRACTOR_CMD, str(fits_path),
+        '-c', str(EXTRACTOR_CONFIG_FILE),
+        '-CATALOG_NAME', str(catalog_out),
+        '-PARAMETERS_NAME', str(EXTRACTOR_PARAM_FILE),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if not catalog_out.exists():
+        return None, result.stderr
+
+    colnames = []
+    with open(catalog_out) as f:
+        for line in f:
+            if line.startswith('#'):
+                colnames.append(line.split()[2])
+            else:
+                break
+    if not colnames:
+        return None, "empty catalog"
+    df = pd.read_csv(catalog_out, comment='#', sep=r'\s+', names=colnames)
+    return df, None
+
+def filter_isolated(x, y, min_sep=ISOLATION_MIN_SEPARATION):
+    n = len(x)
+    if n < 2:
+        return np.ones(n, dtype=bool)
+    isolated = np.ones(n, dtype=bool)
+    for i in range(n):
+        d = np.hypot(x - x[i], y - y[i])
+        d[i] = np.inf
+        if np.any(d < min_sep):
+            isolated[i] = False
+    return isolated
+
+def calibrate_global(inst_mags, apass_b, min_stars=MIN_REF_STARS):
+    mask = np.isfinite(inst_mags) & np.isfinite(apass_b)
+    if mask.sum() < min_stars:
+        return None
+    x, y = apass_b[mask], inst_mags[mask]
+    for _ in range(3):
+        try:
+            coeffs = np.polyfit(x, y, 2)
+            residuals = y - np.polyval(coeffs, x)
+            rms = np.sqrt(np.mean(residuals**2))
+            good = np.abs(residuals) < 3.0 * rms
+            if good.sum() < min_stars:
+                break
+            x, y = x[good], y[good]
+        except Exception:
+            return None
+    if len(x) < min_stars:
+        return None
+    coeffs = np.polyfit(x, y, 2)
+    residuals = y - np.polyval(coeffs, x)
+    rms = np.sqrt(np.mean(residuals**2))
+    return {'coeffs': coeffs, 'rms': rms, 'n_used': len(x),
+            'b_min': float(np.min(x)), 'b_max': float(np.max(x))}
+
+def calibrate_local(inst_mags, apass_b, target_b_estimate,
+                     half_window=LOCAL_HALF_WINDOW, min_stars=MIN_REF_STARS_LOCAL,
+                     growth=LOCAL_WINDOW_GROWTH):
+    mask = np.isfinite(inst_mags) & np.isfinite(apass_b)
+    x_all, y_all = apass_b[mask], inst_mags[mask]
+    if len(x_all) < min_stars:
+        return None
+    window = half_window
+    local_mask = np.abs(x_all - target_b_estimate) <= window
+    for _ in range(5):
+        if local_mask.sum() >= min_stars:
+            break
+        window *= growth
+        local_mask = np.abs(x_all - target_b_estimate) <= window
+    if local_mask.sum() < min_stars:
+        return None
+    x, y = x_all[local_mask], y_all[local_mask]
+    for _ in range(3):
+        try:
+            coeffs = np.polyfit(x, y, 1)
+            residuals = y - np.polyval(coeffs, x)
+            rms = np.sqrt(np.mean(residuals**2))
+            good = np.abs(residuals) < 3.0 * rms
+            if good.sum() < min_stars:
+                break
+            x, y = x[good], y[good]
+        except Exception:
+            return None
+    if len(x) < min_stars:
+        return None
+    coeffs = np.polyfit(x, y, 1)
+    residuals = y - np.polyval(coeffs, x)
+    rms = np.sqrt(np.mean(residuals**2))
+    return {'coeffs': coeffs, 'rms': rms, 'n_used': len(x), 'window_used': float(window),
+            'b_min': float(np.min(x)), 'b_max': float(np.max(x))}
+
+def invert_calibration(calibration, t_inst_mag):
+    coeffs = list(calibration['coeffs'])
+    coeffs[-1] -= t_inst_mag
+    roots = np.roots(coeffs)
+    real_roots = roots[np.abs(roots.imag) < 1e-6].real
+    if len(real_roots) == 0:
+        return None
+    lo, hi = calibration['b_min'], calibration['b_max']
+    in_range = real_roots[(real_roots >= lo - 2) & (real_roots <= hi + 2)]
+    candidates = in_range if len(in_range) > 0 else real_roots
+    return float(min(candidates, key=lambda r: abs(np.polyval(calibration['coeffs'], r) - t_inst_mag)))
+
+def process_plate(fits_path):
+    try:
+        plate_rng = np.random.default_rng(abs(hash(fits_path.name)) % (2**32))
+        header = astrofits.getheader(fits_path)
+        wcs = WCS(header)
+        jd = header.get('JD-OBS', np.nan)
+        h, w = astrofits.getdata(fits_path).shape
+
+        with tempfile.TemporaryDirectory() as workdir:
+            sources, err = run_sextractor(fits_path, workdir)
+        if sources is None or len(sources) == 0:
+            return _empty_result(fits_path, jd, f'SExtractor found nothing ({err})')
+
+        det_x = sources['X_IMAGE'].values
+        det_y = sources['Y_IMAGE'].values
+        det_mag_iso = sources['MAG_ISO'].values
+        det_flags = sources['FLAGS'].values.astype(int)
+        is_saturated_flag = (det_flags & 4) != 0
+
+        ra = ref_catalog['ra'].values
+        dec = ref_catalog['dec'].values
+        apass_b_all = ref_catalog['apass_b_mag'].values
+        cat_x, cat_y = wcs.all_world2pix(ra, dec, 0)
+        margin = 20
+        in_frame = (cat_x > margin) & (cat_x < w - margin) & (cat_y > margin) & (cat_y < h - margin)
+        cat_x, cat_y, apass_b_all = cat_x[in_frame], cat_y[in_frame], apass_b_all[in_frame]
+
+        if len(cat_x) > REF_STARS_MAX_PER_PLATE:
+            keep = plate_rng.choice(len(cat_x), size=REF_STARS_MAX_PER_PLATE, replace=False)
+            cat_x, cat_y, apass_b_all = cat_x[keep], cat_y[keep], apass_b_all[keep]
+
+        matched_inst_mag, matched_apass_b, matched_x, matched_y, matched_sat = [], [], [], [], []
+        for cx, cy, ab in zip(cat_x, cat_y, apass_b_all):
+            d = np.hypot(det_x - cx, det_y - cy)
+            j = np.argmin(d)
+            if d[j] <= MATCH_RADIUS_PX:
+                matched_inst_mag.append(det_mag_iso[j])
+                matched_apass_b.append(ab)
+                matched_x.append(det_x[j])
+                matched_y.append(det_y[j])
+                matched_sat.append(is_saturated_flag[j])
+
+        if len(matched_inst_mag) == 0:
+            return _empty_result(fits_path, jd, 'No SExtractor detections matched catalog stars')
+
+        matched_inst_mag = np.array(matched_inst_mag)
+        matched_apass_b = np.array(matched_apass_b)
+        matched_x = np.array(matched_x)
+        matched_y = np.array(matched_y)
+        matched_sat = np.array(matched_sat)
+
+        isolated = filter_isolated(matched_x, matched_y)
+        good_for_fit = isolated & ~matched_sat & np.isfinite(matched_inst_mag)
+
+        calibration_global = calibrate_global(matched_inst_mag[good_for_fit], matched_apass_b[good_for_fit])
+        n_ref_used = calibration_global['n_used'] if calibration_global else int(good_for_fit.sum())
+
+        ref_rows = []
+        for i in np.where(good_for_fit)[0]:
+            ref_rows.append({'filename': fits_path.name, 'star_id': f'MATCH_{i:04d}',
+                              'apass_b_mag': matched_apass_b[i], 'instrumental_mag': matched_inst_mag[i]})
+
+        tx, ty = wcs.all_world2pix(TARGET_COORD.ra.deg, TARGET_COORD.dec.deg, 0)
+        target_detected = False
+        target_mag = np.nan
+        target_mag_error = np.nan
+        calibration_mode = None
+        final_rms = np.nan
+        final_n_used = 0
+
+        if margin < tx < w - margin and margin < ty < h - margin and calibration_global is not None:
+            d = np.hypot(det_x - tx, det_y - ty)
+            j = np.argmin(d)
+            if d[j] <= MATCH_RADIUS_PX:
+                t_inst_mag = det_mag_iso[j]
+                rough_mag = invert_calibration(calibration_global, t_inst_mag)
+                if rough_mag is not None:
+                    calibration_local = calibrate_local(matched_inst_mag[good_for_fit],
+                                                          matched_apass_b[good_for_fit], rough_mag)
+                    if (calibration_local is not None
+                            and abs(calibration_local['coeffs'][0]) >= MIN_ABS_LOCAL_SLOPE):
+                        local_mag = invert_calibration(calibration_local, t_inst_mag)
+                        if local_mag is not None:
+                            target_mag = local_mag
+                            final_rms = calibration_local['rms']
+                            final_n_used = calibration_local['n_used']
+                            calibration_mode = 'local'
+                    if calibration_mode is None:
+                        target_mag = rough_mag
+                        final_rms = calibration_global['rms']
+                        final_n_used = calibration_global['n_used']
+                        calibration_mode = 'global_fallback'
+                    target_mag_error = final_rms / np.sqrt(max(final_n_used, 1))
+                    target_detected = True
+
+        quality_ok = (
+            calibration_global is not None and n_ref_used >= MIN_REF_STARS and
+            target_detected and calibration_mode == 'local' and
+            np.isfinite(final_rms) and final_rms <= MAX_CALIBRATION_RMS
+        )
+
+        rejection_reason = None
+        if calibration_global is None:
+            rejection_reason = 'Global calibration failed'
+        elif n_ref_used < MIN_REF_STARS:
+            rejection_reason = f'Too few reference stars ({n_ref_used} < {MIN_REF_STARS})'
+        elif not target_detected:
+            rejection_reason = 'Target not detected/matched'
+        elif calibration_mode != 'local':
+            rejection_reason = 'Local calibration unavailable'
+        elif final_rms > MAX_CALIBRATION_RMS:
+            rejection_reason = f'RMS too high ({final_rms:.3f})'
+
+        result_row = {
+            'filename': fits_path.name, 'jd': jd, 'target_detected': target_detected,
+            'target_mag': target_mag, 'target_mag_error': target_mag_error,
+            'target_x': float(tx), 'target_y': float(ty),
+            'num_reference_stars': n_ref_used,
+            'zeropoint': calibration_global['coeffs'][-1] if calibration_global else np.nan,
+            'rms_scatter': final_rms,
+            'calibration_mode': calibration_mode, 'quality_ok': quality_ok,
+            'rejection_reason': rejection_reason,
+        }
+        return {'result_row': result_row, 'ref_rows': ref_rows}
+
+    except Exception as e:
+        return _empty_result(fits_path, np.nan, str(e))
+
+def _empty_result(fits_path, jd, reason):
+    return {'result_row': {
+        'filename': fits_path.name, 'jd': jd, 'target_detected': False,
+        'target_mag': np.nan, 'target_mag_error': np.nan, 'target_x': np.nan, 'target_y': np.nan,
+        'num_reference_stars': 0, 'zeropoint': np.nan, 'rms_scatter': np.nan,
+        'calibration_mode': None, 'quality_ok': False, 'rejection_reason': reason,
+    }, 'ref_rows': []}
+
+progress_bar = widgets.IntProgress(value=0, min=0, max=len(cutouts), description='Plates:')
+progress_html = widgets.HTML(value="")
+display(widgets.VBox([progress_bar, progress_html]))
+
+start = time.monotonic()
+last_render = 0.0
+n_processed = 0
+for i, f in enumerate(cutouts):
+    key = str(f)
+    cached = plate_db.get(key)
+    if not (cached and cached.get('_version', 0) == PIPELINE_VERSION):
+        out = process_plate(f)
+        out['_version'] = PIPELINE_VERSION
+        plate_db[key] = out
+        n_processed += 1
+
+    now = time.monotonic()
+    if now - last_render > 0.15 or (i + 1) == len(cutouts):
+        elapsed = now - start
+        rate = (i + 1) / elapsed if elapsed > 0 else 0
+        progress_bar.value = i + 1
+        progress_html.value = f"{i+1}/{len(cutouts)} ({rate:.2f} plates/sec)"
+        last_render = now
+
+    if (i + 1) % 200 == 0:
+        plate_db.sync()
+
+plate_db.sync()
+print(f"Processed {n_processed} plates this run, {len(plate_db)} total in cache")
+
+current_keys = {str(f) for f in cutouts}
+result_rows, ref_rows_all = [], []
+for f_str in plate_db.keys():
+    if f_str not in current_keys:
+        continue
+    out = plate_db[f_str]
+    if out is None or out.get('_version') != PIPELINE_VERSION:
+        continue
+    result_rows.append(out['result_row'])
+    ref_rows_all.extend(out['ref_rows'])
+
+print(f"Collected {len(result_rows)} result rows for saving")
+
+if len(result_rows) == 0:
+    print("ERROR: No results collected. Something went wrong in the processing loop above.")
+else:
+    results_df = pd.DataFrame(result_rows).sort_values('jd').reset_index(drop=True)
+    results_df.to_csv(RESULTS_PATH, index=False)
+    print(f"Saved {RESULTS_PATH.name} ({len(results_df)} plates)")
+
+    ref_df = pd.DataFrame(ref_rows_all)
+    ref_df.to_csv(REF_PHOTOMETRY_PATH, index=False)
+    print(f"Saved {REF_PHOTOMETRY_PATH.name} ({len(ref_df)} reference measurements)")
+
+    lc_df = results_df[results_df['quality_ok']].copy()
+    lc_df = lc_df.rename(columns={'target_mag': 'magnitude', 'target_mag_error': 'magnitude_error'})
+    lc_df = lc_df[['jd', 'magnitude', 'magnitude_error']].dropna()
+    lc_df.to_csv(LIGHTCURVE_PATH, index=False)
+    print(f"Saved {LIGHTCURVE_PATH.name} ({len(lc_df)} light curve points)")
+
+    print(f"\nCalibration mode breakdown: {results_df['calibration_mode'].value_counts(dropna=False).to_dict()}")
+    print(f"\nTo validate: open unit_Test_Generator.ipynb, set USE_SIMULATED_INPUTS=False, run Cell 2")
+    print(f"It will auto-discover: {OUTPUT_DIR.name}")

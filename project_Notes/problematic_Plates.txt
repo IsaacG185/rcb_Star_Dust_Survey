@@ -7,3 +7,16 @@ Y_MUS : DASCH
 Check : SU Tau
 Check : UW Cen
 Check : V2552_Oph
+
+
+
+[Comparison between SISaP and DASCH]
+- 06584_ax04649m0s0.fits [DASCH only]
+- 06532_rb16694m0s0.fits [DASCH only]
+- 06456_ax04638m0s0.fits [DASCH only]
+- 06484_kf00127m1s0.fits [SISaP only]
+- 06451_ka01771m1s0.fits [SISaP only]
+- 03217_ai32149m0s0.fits [SISaP only]
+- 06555_mf39238m0s0.fits [Both]
+- 06555_mf39238m0s0.fits [Both]
+- 03221_b59919m1s0.fits [Both]

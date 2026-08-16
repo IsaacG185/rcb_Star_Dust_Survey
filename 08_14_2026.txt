@@ -1,0 +1,6 @@
+Meeting notes :
+
+Try to improve saturation calculations on V CrA plates;
+Send light curve data to Dr. Clayton
+
+Get list of DASCH filters

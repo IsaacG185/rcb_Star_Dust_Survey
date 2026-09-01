@@ -1,0 +1,33 @@
+[Status Update]
+- Registered as AAS member.
+DASCH rejection pipeline:
+    - Stage 1 [Scanning: 7,218 → 5,403]
+        - Total catalog exposures for V CrA's field vs. those actually digitized (scanned into a usable cutout image). 1,812 exposures exist in the archive but were never scanned;
+        3 errored on download. Pure physical-archive coverage, unrelated to photometry.
+    - Stage 2 [Photometric pipeline survival: 5,403 → 2,846]
+        - Of the scanned plates, only 2,846 ever came out of DASCH's photometric pipeline with a usable calibrated solution — the other ~2,557 have a real scanned image but
+        never made it through processing. This is the single largest cut in the funnel, larger than the other three stages combined. Confirmed not to be about catalog choice:
+        switching from APASS to ATLAS (~1 billion stars vs. APASS's much sparser catalog) barely changed the count (2,846 → 2,851), ruling out reference-catalog density as
+        the cause. Tracing DASCH's actual pipeline source, the bottleneck instead sits in the catalog-independent stages every plate must clear before any refcat is even
+        involved — most likely a blind astrometric WCS solve (up to 5 attempted configurations before the pipeline gives up on a plate entirely), with SExtractor detection
+        failure and SCAMP crashes as secondary contributors. Best-supported physical causes: shallow/underexposed plates, physical plate degradation (fogging, scratches),
+        tracking errors or optical distortion, and star fields too sparse or difficult for the solver's time budget. Not confirmed against V CrA's actual per-plate pipeline
+        logs — this is strong code-level inference plus one direct A/B test, not a verified log trace.
+    - Stage 3 [Detection: 2,846 → 1,818]
+        - Of the plates with a successful photometric solution, 1,818 actually detected V CrA; 1,028 are genuine non-detections (star too faint for that plate's depth that
+        night). limiting_mag_local is populated for all rows either way, confirming these are real "looked, not visible" measurements.
+    - Stage 4 [DASCH's automatic quality rejection: 1,818 → 1,507]
+        Running apply_standard_rejections() flagged 311 detections as low-quality (bad AFLAGS), leaving 1,507 clean points — this is your "~300 later rejected." Not applied 
+        automatically; must be called explicitly. DASCH's own warning: still under development, don't rely on it to fully clean data.
+
+[To Do] : 
+
+- More plates in mine than in DASCH. Dimmer than 16th, these are bad. This is just noise, so look at these dim plates and see what DASCH does for these.
+    - Use plate limit number for these.
+- Do same for brighter than 8th magnitude, see what DASCH does. 
+
+[Meeting Notes]
+- Use DASCH plates for now, try to improve light curves
+- Ask about cutout pipeline.
+- Abstract for AAS; due 30th September
+- Polish up paper

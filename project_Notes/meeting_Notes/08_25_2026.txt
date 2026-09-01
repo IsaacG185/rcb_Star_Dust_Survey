@@ -1,0 +1,5 @@
+- [V CrA] Why are 4000 plates being thrown out right away by DASCH. V CrA, Started with 7000 exposures, got 3100 in light curve. Filters later reject like 300
+
+- More plates in mine than in DASCH. Dimmer than 16th, these are bad. This is just noise, so look at these dim plates and see what DASCH does for these.
+    - Use plate limit number for these.
+- Do same for brighter than 8th magnitude, see what DASCH does. 

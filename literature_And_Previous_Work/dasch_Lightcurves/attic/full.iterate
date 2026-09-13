@@ -1,0 +1,142 @@
+#!/bin/csh
+#
+#  NOTE: THIS FILE IS OBSOLETE
+#
+#  Nov  6, 2007 Edward J. Los - Remove directory references and use environment variables instead
+#  Nov  7, 2007 Edward J. Los - Remove perl scripts and replace with prepare_mosaic and save_results
+#  Mar 10, 2008 Edward J. Los - Remove save_results
+#  Jul 16, 2008 Edward J. Los - Use catrms=0.02 for webda, sdss, and KeplerCam
+#  Jan 13, 2009 Edward J. Los - Add colorterm.m  
+#
+#  NOTE: THIS FILE IS OBSOLETE
+#  
+#  Note: use catrms=0.22 for gsc catalog
+set imagelist = $1
+cd $DASCH_SCRIPTS
+echo "directory: ${DASCH_SCRIPTS} imagelist: ${imagelist}"
+date
+#$DASCH_SCRIPTS/find_astrometry.csh $imagelist
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/find_multiple.csh $imagelist
+set iteration = 3;
+#################################################
+cd $DASCH_SCRIPTS
+$DASCH_SCRIPTS/prepare_mosaic.csh $imagelist
+cd $DASCH_SCRIPTS
+$DASCH_SCRIPTS/run_sextractor.csh $imagelist 
+while ($iteration > 0)
+  echo "ccmap iteration: $iteration"
+  cd $DASCH_SCRIPTS
+  $DASCH_SCRIPTS/run_match.csh $imagelist 
+  cd $DASCH_SCRIPTS 
+  $DASCH_SCRIPTS/refine_wcs.csh $imagelist
+  cd $DASCH_SCRIPTS
+  $DASCH_SCRIPTS/run_sextractor_second.csh $imagelist 
+  cd $DASCH_SCRIPTS
+  @ iteration = $iteration - 1
+  if ($iteration > 0) then
+    $DASCH_SCRIPTS/refine_iteration.csh $imagelist
+  endif
+end
+cd $DASCH_SCRIPTS
+$DASCH_SCRIPTS/filter_wedge.csh $imagelist
+cd $DASCH_SCRIPTS
+$DASCH_SCRIPTS/run_match_second.csh $imagelist
+cd $DASCH_SCRIPTS
+$DASCH_SCRIPTS/filter_defect.csh $imagelist
+####################### END OF VERSION INDEPENDENT CODE ###############
+cd $DASCH_SCRIPTS
+$DASCH_SCRIPTS/prepare_octave.csh $imagelist 
+cd $DASCH_SCRIPTS
+octave divide_annul9.m $imagelist 
+cd $DASCH_SCRIPTS
+octave colorterm.m $imagelist 
+cd $DASCH_SCRIPTS
+octave annular9.m $imagelist 
+cd $DASCH_SCRIPTS
+$DASCH_SCRIPTS/ingest_matlab2.csh $imagelist
+cd $DASCH_SCRIPTS
+$DASCH_SCRIPTS/run_local_calibration.csh $imagelist
+cd $DASCH_SCRIPTS
+$DASCH_SCRIPTS/recover_points.csh $imagelist catrms=0.22 
+##
+##  PASS TWO
+##
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/prepare_octave.csh $imagelist  pass2  id_all_good_plates_local.db
+#cd $DASCH_SCRIPTS
+#octave divide_annul9.m $imagelist pass2
+#cd $DASCH_SCRIPTS
+#octave annular9.m $imagelist pass2
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/ingest_matlab2.csh $imagelist pass2
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/run_local_calibration.csh $imagelist pass2
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/recover_points.csh $imagelist catrms=0.22 pass2
+##
+##  webda2
+##
+#setenv DASCH_NUMBINS     "1"
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/prepare_octave.csh $imagelist  webda2  webda.db
+#cd $DASCH_SCRIPTS
+#octave divide_annul9.m $imagelist webda2
+#cd $DASCH_SCRIPTS
+#octave annular9.m $imagelist webda2
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/ingest_matlab2.csh $imagelist webda2
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/run_local_calibration.csh $imagelist webda2
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/recover_points.csh $imagelist catrms=0.02 webda2
+##
+##  M44sdsskep16x16
+##
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/prepare_octave.csh $imagelist  M44sdsskep16x16  M44sdsskep16x16.db
+#cd $DASCH_SCRIPTS
+#octave divide_annul9.m $imagelist M44sdsskep16x16
+#cd $DASCH_SCRIPTS
+#octave annular9.m $imagelist M44sdsskep16x16
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/ingest_matlab2.csh $imagelist M44sdsskep16x16
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/run_local_calibration.csh $imagelist M44sdsskep16x16
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/recover_points.csh $imagelist catrms=0.02 M44sdsskep16x16
+##
+##  sdssM4416x16clean
+##
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/prepare_octave.csh $imagelist  sdssM4416x16clean  sdssM4416x16clean.db
+#cd $DASCH_SCRIPTS
+#octave divide_annul9.m $imagelist sdssM4416x16clean
+#cd $DASCH_SCRIPTS
+#octave annular9.m $imagelist sdssM4416x16clean
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/ingest_matlab2.csh $imagelist sdssM4416x16clean
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/run_local_calibration.csh $imagelist sdssM4416x16clean
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/recover_points.csh $imagelist catrms=0.02 sdssM4416x16clean
+##
+##  sdssM4416x16saturated
+##
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/prepare_octave.csh $imagelist  sdssM4416x16saturated  sdssM4416x16saturated.db
+#cd $DASCH_SCRIPTS
+#octave divide_annul9.m $imagelist sdssM4416x16saturated
+#cd $DASCH_SCRIPTS
+#octave annular9.m $imagelist sdssM4416x16saturated
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/ingest_matlab2.csh $imagelist sdssM4416x16saturated
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/run_local_calibration.csh $imagelist sdssM4416x16saturated
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/recover_points.csh $imagelist catrms=0.02 sdssM4416x16saturated
+#
+#  Cleanup of intermediate files
+#
+#cd $DASCH_SCRIPTS
+#$DASCH_SCRIPTS/clean_intermediate.csh $imagelist 

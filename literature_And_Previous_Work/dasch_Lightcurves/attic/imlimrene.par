@@ -1,0 +1,4 @@
+oldnames,s,a,"rh15796_00_01r180ww.fit",,,"images to be renamed"
+newnames,s,a,"rh15796_00_01r180ww_tnx.fits",,,"new image names"
+verbose,b,h,no,,,"report each rename operation"
+mode,s,h,"ql",,,

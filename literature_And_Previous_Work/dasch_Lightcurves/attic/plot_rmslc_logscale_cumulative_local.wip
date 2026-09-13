@@ -1,0 +1,134 @@
+device /xw
+
+viewport 0.15 0.99 0.1 0.99
+lw 5
+expand 1.5
+
+
+data rmslc_all_local.cumulative
+xc 1
+yc 2
+log y
+lim
+lim x1 x2 -1 y2
+box bncst lbncst
+mtext B 2.2 0.5 0.5 Lightcurve RMS (mag)
+mtext L 3.0 0.5 0.5 N < RMS (Stars, Cumulative)
+lstyle 4
+lwidth 8
+color 15
+bin
+
+lstyle 1
+lwidth 5
+
+data rmslc_b_7-8_local.cumulative
+xc 1
+yc 2
+log y
+color 1
+bin
+
+data rmslc_b_8-9_local.cumulative
+xc 1
+yc 2
+log y
+color 2
+bin
+
+data rmslc_b_9-10_local.cumulative
+xc 1
+yc 2
+log y
+color 3
+bin
+
+data rmslc_b_10-11_local.cumulative
+xc 1
+yc 2
+log y
+color 4
+bin
+
+data rmslc_b_11-12_local.cumulative
+xc 1
+yc 2
+log y
+color 5
+bin
+
+data rmslc_b_12-13_local.cumulative
+xc 1
+yc 2
+log y
+color 6
+bin
+
+data rmslc_b_13-14_local.cumulative
+xc 1
+yc 2
+log y
+color 7
+bin
+
+data rmslc_b_14-15_local.cumulative
+xc 1
+yc 2
+log y
+color 8
+bin
+
+############################
+# overplot the RMS quantiles for the ALL stars cumulative histogram
+
+color 15
+data rms_quantiles_local.col
+xc 1 
+yc 2
+lstyle 4
+connect
+xc 3
+connect
+xc 4
+connect
+
+############################
+
+viewport 0.65 0.95 0.6 0.9
+lstyle 1
+data rms_vs_mag_local.col
+xc 1
+yc 2
+lim 
+lim x1 x2 0 0.5
+color 1 
+box
+mtext B 2.2 0.5 0.5 Magnitude
+mtext L 3.0 0.5 0.5 RMS 
+mtext T 0.5 0.5 0.5 RMS vs Magnitude
+
+# plot median
+ecol 3
+symbol 18
+expand 2.0
+points 1
+
+# plot 90th Percentile
+lwidth 8
+color 1
+yc 4
+connect
+
+# plot 10th Percentile
+lwidth 8
+lstyle 2
+color 1
+yc 5
+connect
+
+
+expand 1.0
+lwidth 4
+mtext T -3.5 0.5 0.5 Line= 10\uth\d Percentile
+mtext T -1.5 0.5 0.5 Dashes= 90\uth\d Percentile
+mtext T -2.5 0.5 0.5 Points= Median

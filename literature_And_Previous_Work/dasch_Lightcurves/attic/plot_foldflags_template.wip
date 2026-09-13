@@ -1,0 +1,28 @@
+# note the use of "pcol" which sets the plotting symbols for each point
+device FILE.ps/ps
+
+lw 5
+expand 1.5 
+viewport 0.1 0.95 0.1 0.9
+
+data FILE
+xc 1
+yc 3
+ecol 4
+pcol 5
+
+lim
+lim 0 2 y2 y1
+box
+color 14
+err 6
+color 1 
+points
+
+mtext T 0.5 0.5 0.5 FILE
+mtext T -5 0.5 0.5 Period = PERIOD Days
+
+mtext B 2.5 0.5 0.5 Phase
+mtext L 2.5 0.5 0.5 Magnitude
+
+exit

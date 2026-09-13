@@ -1,0 +1,117 @@
+# Template to plot lightcurve
+# this version has 3 panels 
+# plotting Julian Date and Sequence number vs Magnitude and plate-distance
+# 
+#  1        2    3           4    5             6                7      8     9              10                 11         12                 13     14             15             16       17     18         19
+#  Sequence Date spatial_bin flag magcal_magdep magcal_local_rms nlocal plate magcal_iso_rms magcal_local_error magcal_iso limiting_mag_local AFLAGS reject_reason1 reject_reason2 dradRMS2 SFLAGS FWHM_IMAGE magcal_local
+#
+# Jun 14, 2008 - Edward J. Los:  Initial version to plot RMS values
+# Aug 22, 2008 - Edward J. Los:  Add ERROR_BAR_FACTOR, the factor by which magcal_local_rms and magcal_iso_rms has been
+#                                reduced so that the clipped median RMS is equal to the clipped zero-based RMS of 
+#                                magcal_local_rms for good stars.
+# Apr 21, 2009 - Edward J. Los:  Replace the topmost plot with a plot of the magnitude vs limiting magnitude
+# May 18, 2010 - Edward J. Los:  Swap panel #1 with panel #3 of the plot_lc_template_flags_local.wip script
+# Nov 29, 2011 - Edward J. Los:  Add magcal_magdep support; plot magcal_iso (red) magcal_local (green) and magcal_magdep  (black) on third panel
+#
+
+device OUTPUT.ps/cps
+data FILE
+
+lw 4
+expand 1.5
+viewport 0.1 0.95 0.08 0.91
+
+
+###############################################################################
+##### TOP panel of 3:  Distance from center of plate, chronological order ##
+#####  uses the same plot symbols as the lightcurves ##########################
+####  Connected line indicates the number of neighbors for local calibration ##
+###############################################################################
+
+panel 1 3 3
+color 1
+xc 1
+yc 3
+pcol 4
+lim
+box bncst bnst
+mtext T 0.5 0.5 0.5 FILE_rms 
+mtext B 2.0 0.5 0.5 Plate Sequence.  Error Bar Factor = ERROR_BAR_FACTOR     
+mtext L 2.0 0.5 0.5 Plate Spatial Bin
+
+points
+
+yc 7
+lim
+box "" cmt
+color 2
+mtext R 2.2 0.5 0.5 Local Calibrators
+lw 2
+connect
+
+###############################################################################
+##### MIDDLE panel of 3:  magcal_local_error ########
+###############################################################################
+
+panel 1 3 2
+lw 4
+xc 1
+yc 5 
+ 
+lim
+lim x1 x2 y2 y1
+color 1
+box bncst bnsct
+mtext B 2.0 0.5 0.5 Plate Sequence. REF=REFNO RA=RASC DEC=DECLINATION
+mtext L 2.0 0.5 0.5 Magnitude
+mtext T 0.5 0.5 0.5 Error Bars are magcal_local_error, the Local Calibration error
+
+# error bars first so the points are on top
+color 15
+ecol 10
+error 6
+
+# now the magnitudes
+color 1
+yc 5
+points
+
+
+
+###############################################################################
+##### BOTTOM panel of 3:  magcal_local_rms ##
+###############################################################################
+
+panel 1 3 1
+color 1
+xc 1
+yc 5 
+ 
+lim
+lim x1 x2 MAXMAG MINMAG
+color 1
+box bncst bnsct
+mtext B 2.0 0.5 0.5 Plate Sequence. Stdmag=STDMAG color=COLOR VFlag=VFLAG MAGFlag=MAGFLAG RaPM=RAPM DecPM=DECPM
+mtext L 2.0 0.5 0.5 Magnitude
+mtext T 0.5 0.5 0.5 iso: red; local: green; magdep: black Error: magcal_local_rms (8/22/2008 Algorithm)
+
+# error bars first so the points are on top
+color 15
+ecol 6
+error 6
+
+# now the magnitudes
+color 2
+yc 11 
+points
+
+color 3
+yc 19 
+points
+
+color 1
+yc 5
+points
+
+end
+exit

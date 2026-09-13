@@ -1,0 +1,125 @@
+# Template to plot lightcurve
+# this version has 3 panels 
+# plotting Julian Date and Sequence number vs Magnitude and plate-distance
+# 
+#  1       2     3          4    5            6                7        8     9             10                  11         12
+# Sequence Date spatial_bin flag magcal_magdep magcal_local_rms nlocal plate magcal_iso_rms  magcal_local_error magcal_iso limiting_mag_local
+#
+# Mar 15, 2008 - Edward J. Los:  Remove magcal_iso, magcal_iso_error
+#                                Substitude spatial_bin for plate_dist
+# Jul  1, 2008 - Edward J. Los:  Plot the local limiting magnitude in the middle window
+# Jul 28, 2008 - Edward J. Los:  Plot smaller hyphens for the limiting magnitude
+# Aug 22, 2008 - Edward J. Los:  Add ERROR_BAR_FACTOR, the factor by which magcal_local_rms and magcal_iso_rms has been
+#                                reduced so that the clipped median RMS is equal to the clipped zero-based RMS of 
+#                                magcal_local_rms for good stars.
+# Jun 18, 2009 - Edward J. Los:  Add GSC catalog information to the plot
+# Jun 22, 2009 - Edward J. Los:  Add JDBEGIN and JDEND to make labels agree with ephemeris time
+# May 18, 2010 - Edward J. Los:  Swap panel #3 with panel #1 of the plot_lc_template_flags_rms.wip script
+#
+
+device OUTPUT.ps/cps
+data FILE
+
+############################################################
+##### TOP panel of 3:  magnitudes versus time (MJD) ########   
+############################################################
+lw 4
+expand 1.5
+viewport 0.1 0.95 0.08 0.91
+
+panel 1 3 3 
+
+xc 2
+yc 5
+# flag (plot symbols) column is 6
+pcol 4
+
+lim 
+lim JDBEGIN JDEND y2 y1
+box bnst bncst
+
+mtext B 2.0 0.5 0.5 Julian Date
+mtext L 2.0 0.5 0.5 Magnitude
+mtext T 1.9 0.5 0.5 FILE Median Magnitude=RAW_MEDIAN_LOCAL RMS Local=RAW_RMS_LOCAL 
+
+# error bars first so the points are on top
+color 15
+ecol 6
+error 6
+
+# now the magnitudes 
+color 1
+yc 5
+points 
+
+# Write the YEAR along the top of the plot, by creating a new axis.
+color 1
+lim YRBEGIN YREND y1 y2
+box cmst ""
+
+###############################################################################
+##### MIDDLE panel of 3:  magnitudes in chronological sequential order ########
+###############################################################################
+
+panel 1 3 2
+lw 4
+xc 1
+yc 5 
+ 
+lim
+lim x1 x2 y2 y1
+color 1
+box bncst bnsct
+mtext B 2.0 0.5 0.5 Plate Sequence. REF=REFNO RA=RASC DEC=DECLINATION
+mtext L 2.0 0.5 0.5 Magnitude
+
+# error bars first so the points are on top
+color 15
+ecol 6
+error 6
+
+# now the magnitudes
+color 1
+yc 5
+points
+
+# now the limiting magnitudes
+pcol 0
+symbol 45.5
+yc 12
+points
+
+pcol 4
+
+##### GIVE STATISTICS #####
+color 1
+mtext T 0.5 0.5 0.5 Points=NPOINTS(NGPOINTS)  Clipped Median Magnitude=CLIP_MEDIAN_LOCAL Clipped RMS Local=CLIP_RMS_LOCAL  
+
+############################################################
+##### BOTTOM panel of 3:  magnitude vs limiting magnitude ########   
+############################################################
+
+panel 1 3 1 
+xc 12
+yc 5 
+# flag (plot symbols) column is 6
+pcol 4
+ 
+lim
+lim x1 x2 y2 y1
+color 1
+box bncst bnsct
+mtext B 2.0 0.5 0.5 limiting_mag_local (Error Bar Factor = ERROR_BAR_FACTOR)
+mtext L 2.0 0.5 0.5 Magnitude
+mtext T 0.5 0.5 0.5 Saturation.  Stdmag=STDMAG color=COLOR VFlag=VFLAG MAGFlag=MAGFLAG RaPM=RAPM DecPM=DECPM
+
+
+# now the magnitudes
+color 1
+yc 5
+points
+
+
+
+end
+exit

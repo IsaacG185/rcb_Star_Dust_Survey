@@ -1,0 +1,1 @@
+1890 9.5 10 0 8 BL From bottom to top: 0, 25, 50, 75, and 100th percentile

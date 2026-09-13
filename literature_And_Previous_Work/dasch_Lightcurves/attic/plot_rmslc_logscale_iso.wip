@@ -1,0 +1,103 @@
+device /xw
+
+viewport 0.15 0.99 0.1 0.99
+lw 5
+expand 1.5
+
+
+data rmslc_all_iso.hist
+xc 1
+yc 2
+log y
+lim
+lim x1 x2 -1 y2
+box bncst lbncst
+mtext B 2.2 0.5 0.5 Lightcurve RMS (mag)
+mtext L 3.0 0.5 0.5 N Stars
+lstyle 4
+lwidth 8
+color 14
+bin
+
+lstyle 1
+lwidth 5
+
+
+data rmslc_b_7-8_iso.hist
+xc 1
+yc 2
+log y
+color 1
+bin
+
+data rmslc_b_8-9_iso.hist
+xc 1
+yc 2
+log y
+color 2
+bin
+
+data rmslc_b_9-10_iso.hist
+xc 1
+yc 2
+log y
+color 3
+bin
+
+data rmslc_b_10-11_iso.hist
+xc 1
+yc 2
+log y
+color 4
+bin
+
+data rmslc_b_11-12_iso.hist
+xc 1
+yc 2
+log y
+color 5
+bin
+
+data rmslc_b_12-13_iso.hist
+xc 1
+yc 2
+log y
+color 6
+bin
+
+data rmslc_b_13-14_iso.hist
+xc 1
+yc 2
+log y
+color 7
+bin
+
+data rmslc_b_14-15_iso.hist
+xc 1
+yc 2
+log y
+color 8
+bin
+
+############################
+
+viewport 0.6 0.9 0.5 0.8
+data rms_vs_mag_iso.col
+xc 1
+yc 2
+lim
+color 1 
+box
+mtext B 2.2 0.5 0.5 Magnitude
+mtext L 3.0 0.5 0.5 RMS 
+
+
+color 15
+connect
+#yc 3
+#connect
+
+ecol 3
+symbol 18
+expand 2.0
+points 1

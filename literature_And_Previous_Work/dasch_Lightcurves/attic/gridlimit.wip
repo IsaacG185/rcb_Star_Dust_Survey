@@ -1,0 +1,58 @@
+# Check the binning algorithm
+device gridlimit.gif/gif
+#device /xw
+viewport 0.1 0.95 0.08 0.91
+data grid.out
+
+panel 1 2 1
+
+lim 0 20  0 3500
+box
+xlabel GSC2.3.2 magnitude
+ylabel BINS 
+color 1
+xc 1
+yc 7
+connect
+mtext LV -2 0.9 0 Number of bins for the above data
+mtext LV -2 0.83 0 Sample of 418 plates from the M44 dataset
+mtext LV -2 0.76 0 Bin 9 is excluded.
+
+panel 1 2 2
+symbol 1
+lim 0 20  -19 -7
+box
+xlabel GSC2.3.2 magnitude
+ylabel MAG_ISO
+mtext LV -2 0.9 0 Range of calibrated MAG_ISO for a given GSC2.3.2 magnitude
+color 2
+xc 1
+yc 2
+connect
+mtext LV -2 0.55 0 Minimum Value
+
+color 6
+xc 1
+yc 3
+connect
+mtext LV -2 0.62 0 10th percentile
+
+color 7
+xc 1
+yc 4
+connect
+mtext LV -2 0.69 0 Median Value
+
+color 5
+xc 1
+yc 5
+connect
+mtext LV -2 0.76 0 90th percentile
+
+color 4
+xc 1
+yc 6
+connect
+mtext LV -2 0.83 0 Maximum Value
+
+exit

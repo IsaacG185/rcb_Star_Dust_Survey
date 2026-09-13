@@ -1,0 +1,4 @@
+input,s,a,"/dasch/raid005/ExposureData/Mosaics/i/31090_00/i31090_00_01r180ww.fit",,,"Input images"
+output,s,a,"/dasch/raid005/ExposureData/Mosaics/i/31090_00/i31090_00_01r180ww_tnx.fits",,,"Output images or directory"
+verbose,b,h,yes,,,"Print operations performed?"
+mode,s,h,"ql",,,

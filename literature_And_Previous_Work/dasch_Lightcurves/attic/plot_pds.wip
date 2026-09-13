@@ -1,0 +1,38 @@
+
+device DATA.ps/ps
+lw 5
+expand 1.5
+viewport 0.1 0.95 0.1 0.95 
+data DATA
+xc 1
+yc 2
+lim
+lim
+box bcnst bcnst
+mtext B 2.5 0.5 0.5 Frequency (1/days)
+mtext L 2.5 0.5 0.5 Lomb_Scargle Power
+mtext T 0.5 0.5 0.5 DATA
+
+bin
+
+#### Now plot the detection confidence limits #####
+
+data DATA.limits
+xc 1
+yc 2
+
+lstyle 2 
+connect
+
+yc 3
+lstyle 3
+connect
+
+yc 4
+lstyle 4
+connect
+
+
+
+end
+exit

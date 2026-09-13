@@ -1,0 +1,7 @@
+#!/bin/csh
+#        Plot standard deviation as a function of focus
+#
+setenv GMTHOME /dasch/genericmapping/GMT4.0
+setenv NETCDFHOME /dasch/genericmapping/netcdf-3.6.0-p1
+setenv PATH "${PATH}:${GMTHOME}/bin"
+setenv MANPATH "${GMTHOME}/man:/dasch/scanner/linux/wcstools/wcstools-3.8.1/Man:/usr/kerberos/man:/usr/local/share/man:/usr/share/man/en:/usr/share/man:/usr/X11R6/man"

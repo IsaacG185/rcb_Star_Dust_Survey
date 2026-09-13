@@ -1,0 +1,5 @@
+14 0.90 10 0 8 BL Mag 11.4 Helium Subdwarf  Black
+14 0.85 10 0 8 BL Mag 12.8 3c273            Blue
+14 0.80 10 0 8 BL Mag 14.3 PG0844           Yellow
+14 0.75 10 0 8 BL Mag 14.4 PG2130           Green
+14 0.70 10 0 8 BL Mag 14.5 PG1211           Red

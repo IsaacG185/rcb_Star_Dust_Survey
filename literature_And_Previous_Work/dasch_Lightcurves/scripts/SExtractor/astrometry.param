@@ -1,0 +1,9 @@
+#Last revised 2008-05-14 Edward J. Los:  Add FLUX_ISO
+#             2008-05-19 Edward J. Los:  Remove FLUX_ISO, KRON_RADIUS,
+#                                        BACKGROUND, FLUX_MAX, THETA_J2000,
+#                                        FWHM_IMAGE and ISOAREA_IMAGE
+MAG_ISO
+X_IMAGE
+Y_IMAGE
+FLAGS
+ELLIPTICITY

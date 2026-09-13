@@ -1,0 +1,13 @@
+diff --git a/src/cplot.c b/src/cplot.c
+index efd1103..f9cd20d 100644
+--- a/src/cplot.c
++++ b/src/cplot.c
+@@ -57,7 +57,7 @@ struct {cplotdevenum device; char *devname; char *extension;}
+ 		{CPLOT_PS, "ps", ".ps"},
+ 		{CPLOT_PSC, "psc", ".ps"},
+ 		{CPLOT_XFIG, "xfig", ".fig"},
+-		{CPLOT_PNG, "png",".png"},
++		{CPLOT_PNG, "pngcairo",".png"},
+ 		{CPLOT_JPEG, "jpeg",".jpg"},
+ 		{CPLOT_PSTEX, "pstex", ".ps"},
+ 		{CPLOT_AQT, "aqt", ""},

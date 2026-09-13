@@ -1,0 +1,5 @@
+*.a
+*.o
+*.oct
+*.simg
+__pycache__/

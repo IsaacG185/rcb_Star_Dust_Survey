@@ -1,0 +1,120 @@
+diff --git a/tawk/mawk.h b/tawk/mawk.h
+index 8d14761..969f4b2 100644
+--- a/tawk/mawk.h
++++ b/tawk/mawk.h
+@@ -10,6 +10,13 @@ Mawk is distributed without warranty under the terms of
+ the GNU General Public License, version 2, 1991.
+ ********************************************/
+ 
++#define yyparse         tawkyyparse
++#define yylex           tawkyylex
++#define yyerror         tawkyyerror
++#define yydebug         tawkyydebug
++#define yynerrs         tawkyynerrs
++#define yylval          tawkyylval
++#define yychar          tawkyychar
+ 
+ 
+ extern double	SAOstrtod();
+diff --git a/tawk/parse.c b/tawk/parse.c
+index a529288..b20f00d 100644
+--- a/tawk/parse.c
++++ b/tawk/parse.c
+@@ -40,6 +40,14 @@
+    define necessary library symbols; they are noted "INFRINGES ON
+    USER NAME SPACE" below.  */
+ 
++#define yyparse         tawkyyparse
++#define yylex           tawkyylex
++#define yyerror         tawkyyerror
++#define yydebug         tawkyydebug
++#define yynerrs         tawkyynerrs
++#define yylval          tawkyylval
++#define yychar          tawkyychar
++
+ /* Identify Bison output.  */
+ #define YYBISON 1
+ 
+diff --git a/utillib/sokfile.c b/utillib/sokfile.c
+index 8a8b747..9189e86 100644
+--- a/utillib/sokfile.c
++++ b/utillib/sokfile.c
+@@ -87,7 +87,7 @@ int FileINetParse(file, port, adrinet)
+ 	struct sockaddr_in *adrinet; /* socket info structure to fill? */
+ {
+     struct hostent *hp;		/* -> hostent structure for host */
+-    char            hostname[MAXHOSTNAMELEN + 12]; /* name of host */
++    char            hostname[2048]; /* name of host */
+     char           *portstr;	/* internet port number (ascii) */
+     int             type = 2;	/* return code */
+ 
+diff --git a/tablelib/table.h b/tablelib/table.h
+index 64d504c..fbb79e4 100644
+--- a/tablelib/table.h
++++ b/tablelib/table.h
+@@ -19,7 +19,7 @@ double 	SAOstrtod();
+ char	*trim();
+ 
+ #define TABLE_PARSE	 2	/* Parse the input rows, trimming up space */
+-/* #define TABLE_NOCASE	 4	/* Ignore case in header names.		   */
++/* #define TABLE_NOCASE	 4	-- Ignore case in header names.		   */
+ #define TABLE_JUSTIFY	 8	/* Justify output rows.			   */
+ 
+ #define TABLE_NICETAB	16	/* Parsing mode.			   */
+diff --git a/tablesrc/report.c b/tablesrc/report.c
+index 53689be..570a145 100644
+--- a/tablesrc/report.c
++++ b/tablesrc/report.c
+@@ -141,7 +141,7 @@ typedef unsigned int flex_uint32_t;
+ 
+ /* Size of default input buffer. */
+ #ifndef YY_BUF_SIZE
+-#define YY_BUF_SIZE 16384
++#define YY_BUF_SIZE 2097152
+ #endif
+ 
+ /* The state buf must be large enough to hold one state per character in the main buffer.
+@@ -604,7 +604,7 @@ static int input (void );
+ 
+ /* Amount of stuff to slurp up with each read. */
+ #ifndef YY_READ_BUF_SIZE
+-#define YY_READ_BUF_SIZE 8192
++#define YY_READ_BUF_SIZE 1048576
+ #endif
+ 
+ /* Copy whatever the last rule matched to the standard output. */
+diff --git a/tablesrc/table.c b/tablesrc/table.c
+index d1a7d7d..99c4971 100644
+--- a/tablesrc/table.c
++++ b/tablesrc/table.c
+@@ -129,15 +129,7 @@ typedef unsigned int flex_uint32_t;
+ 
+ /* Size of default input buffer. */
+ #ifndef YY_BUF_SIZE
+-#ifdef __ia64__
+-/* On IA-64, the buffer size is 16k, not 8k.
+- * Moreover, YY_BUF_SIZE is 2*YY_READ_BUF_SIZE in the general case.
+- * Ditto for the __ia64__ case accordingly.
+- */
+-#define YY_BUF_SIZE 32768
+-#else
+-#define YY_BUF_SIZE 16384
+-#endif /* __ia64__ */
++#define YY_BUF_SIZE 2097152
+ #endif
+ 
+ /* The state buf must be large enough to hold one state per character in the main buffer.
+@@ -695,12 +687,7 @@ static int input ( void );
+ 
+ /* Amount of stuff to slurp up with each read. */
+ #ifndef YY_READ_BUF_SIZE
+-#ifdef __ia64__
+-/* On IA-64, the buffer size is 16k, not 8k */
+-#define YY_READ_BUF_SIZE 16384
+-#else
+-#define YY_READ_BUF_SIZE 8192
+-#endif /* __ia64__ */
++#define YY_READ_BUF_SIZE 1048576
+ #endif
+ 
+ /* Copy whatever the last rule matched to the standard output. */

@@ -1,0 +1,15 @@
+[WHat I did]
+
+- Use DASCH plates for now, try to improve light curves
+
+
+[To Do] : 
+
+- More plates in mine than in DASCH. Dimmer than 16th, these are bad. This is just noise, so look at these dim plates and see what DASCH does for these.
+    - Use plate limit number for these.
+- Do same for brighter than 8th magnitude, see what DASCH does. 
+- Ask about cutout pipeline.
+- Abstract for AAS; due 30th September
+
+[Meeting Notes]
+- Polish up paper; put plots on paper

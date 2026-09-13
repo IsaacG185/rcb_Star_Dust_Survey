@@ -1,0 +1,355 @@
+#! /usr/bin/env python3
+# Copyright the President and Fellows of Harvard College
+# Licensed under the MIT License
+
+"""
+This program replaces the shell scripts `imfsmpsex` and `imgsmpsex` that used to
+be used by the AstrometryWCS step of the DASCH pipeline. It runs SExtractor on
+an image, applies some very basic filtering, and transforms the output so that
+it can be fed into the `dasch-imwcs` program, which is a customized version of
+the WCSTools `imwcs` solver.
+"""
+
+import argparse
+from dataclasses import dataclass
+import os.path
+import subprocess
+import sys
+from tempfile import NamedTemporaryFile
+from typing import List
+
+import numpy as np
+
+
+N_STARS = 5000  # the maximum number of stars to emit
+CUTOFF_SIZE_FACTOR = 5  # see size_cutoff computation below
+TARGET_STARS_PREFERRED_FACTOR = 1.3  # see min_star_preferred computation below
+MIN_STARS_OUT = 30  # signal an error if we end up with fewer than this number of stars
+
+
+@dataclass
+class SextractorSettings:
+    detect_minarea: int
+    detect_thresh: float
+    filter: bool
+    clean: bool
+
+    def as_argv(self) -> List[str]:
+        return [
+            "-DETECT_MINAREA",
+            str(self.detect_minarea),
+            "-DETECT_THRESH",
+            f"{self.detect_thresh:.2f}",
+            "-FILTER",
+            "Y" if self.filter else "N",
+            "-CLEAN",
+            "Y" if self.clean else "N",
+        ]
+
+
+BIN16_SEXTRACTOR_SETTINGS = [
+    SextractorSettings(3, 8.0, True, True),
+    SextractorSettings(2, 5.0, False, True),
+    SextractorSettings(2, 4.0, False, False),
+    SextractorSettings(1, 3.0, False, False),  # original settings
+]
+
+
+BIN01_SEXTRACTOR_SETTINGS = [
+    SextractorSettings(5, 8.0, True, True),
+    SextractorSettings(5, 3.0, True, False),  # original settings
+]
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        choices=["bin16", "bin01"],
+        metavar="MODE",
+        required=True,
+        help="The processing mode",
+    )
+    parser.add_argument(
+        "in_path",
+        metavar="FITS-PATH",
+        help="The input FITS file path",
+    )
+    parser.add_argument(
+        "out_path",
+        metavar="DAO-PATH",
+        help="The output DAOFIND-style file path",
+    )
+
+    settings = parser.parse_args()
+    scripts = os.environ["DASCH_SCRIPTS"]
+
+    # First thing to do is to run `imcat` to find out around how many real stars
+    # should be in our image. This works because the input has already had an
+    # Astrometry.Net solution applied, so its WCS should be very good overall.
+    # Note, however, that in a certain sense this number could be too low by a
+    # factor of a few if this is a multiple-exposure plate: stars from other
+    # fields will also contribute.
+    #
+    # We do this because we want to run SExtractor with tolerances that are as
+    # tight as we can get away with, which we do by looking at the number of
+    # sources that it returns. The expected number of stars is highly variable:
+    # a plate like C20125 has only ~50 real stars, while some A plates may have
+    # tens of thousands.
+    #
+    # The specification of tycho2 here aligns with the catalog used by
+    # AstrometryWCS in its invocation of dasch-imwcs.
+
+    argv = [
+        "imcat",
+        "-c",
+        "tycho2",
+        "-f",  # print number of stars
+        settings.in_path,
+    ]
+
+    print(f"dasch-wcssextractor: `{' '.join(argv)}`")
+    n_catalog_stars = None
+
+    child = subprocess.Popen(
+        argv,
+        shell=False,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+    )
+
+    for line in child.stdout:
+        # we should only get one line of output here
+        bits = line.split()
+        n_catalog_stars = int(bits[-1])
+
+    code = child.wait()
+    if code:
+        print(
+            f"dasch-wcssextractor: fatal error running imcat on `{settings.in_path}`; return code {code}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if n_catalog_stars is None or n_catalog_stars < 1:
+        print(
+            f"dasch-wcssextractor: imcat succeeded but we didn't extract a result",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    min_stars_preferred = int(n_catalog_stars * TARGET_STARS_PREFERRED_FACTOR)
+
+    # We require at least MIN_STARS_OUT in the final answer, so that's a good
+    # lower limit to apply.
+    min_stars_preferred = max(min_stars_preferred, MIN_STARS_OUT)
+
+    # We're going to limit the final output to N_STARS, so if we're in the
+    # regime where we're detecting a lot more stars than that, we might as well
+    # keep our tolerances tight. But there will be some filtering, so aim for
+    # something a bit above the hard limit.
+    min_stars_preferred = min(
+        min_stars_preferred, int(N_STARS * TARGET_STARS_PREFERRED_FACTOR)
+    )
+
+    print(f"dasch-wcssextractor: tolerances targeting {min_stars_preferred} stars")
+
+    # Set up to run SExtractor
+
+    cfgdir = os.path.join(scripts, "Sextractor")
+
+    if settings.mode == "bin16":
+        config_name = "imfsmpsex_default.sex"
+        variants = BIN16_SEXTRACTOR_SETTINGS
+    elif settings.mode == "bin01":
+        config_name = "imgsmpsex_silas.sex"
+        variants = BIN01_SEXTRACTOR_SETTINGS
+    else:
+        assert False
+
+    # Try different variants until we get something acceptable
+
+    for i_variant, variant in enumerate(variants):
+        argv = (
+            [
+                "sex",
+                "-c",
+                os.path.join(cfgdir, config_name),
+            ]
+            + variant.as_argv()
+            + [
+                "-CATALOG_NAME",
+                "STDOUT",
+                settings.in_path,
+            ]
+        )
+
+        print(f"dasch-wcssextractor: `{' '.join(argv)}`")
+
+        # Run it and buffer the data. We just hardcode the output column format.
+
+        x = []
+        y = []
+        mag = []
+        size = []
+        ellip = []
+        n_seen = 0
+
+        child = subprocess.Popen(
+            argv,
+            shell=False,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+        )
+
+        for line in child.stdout:
+            if line.startswith("#"):
+                continue
+
+            n_seen += 1
+            bits = line.split()
+            this_x = float(bits[0])
+            this_y = float(bits[1])
+            this_mag = float(bits[2])
+            flags = int(bits[3])
+            a_image = float(bits[4])
+            b_image = float(bits[5])
+
+            # Context-free data filters:
+
+            if this_mag > 90.0:
+                continue
+
+            if flags > 3:
+                continue
+
+            # We'll keep this one.
+
+            x.append(this_x)
+            y.append(this_y)
+            mag.append(this_mag)
+            size.append(np.hypot(a_image, b_image))
+
+            if a_image > 0:  # Just in case ...
+                ellip.append(1 - b_image / a_image)
+            else:
+                ellip.append(0)
+
+        code = child.wait()
+        if code:
+            print(
+                f"dasch-wcssextractor: fatal error running sextractor on `{settings.in_path}`; return code {code}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # Check how many sources we have; but if we're trying the final variation,
+        # accept whatever we've got
+
+        be_choosy = i_variant < len(variants) - 1
+        x = np.array(x)
+        y = np.array(y)
+        mag = np.array(mag)
+        size = np.array(size)
+        ellip = np.array(ellip)
+        n_kept1 = x.size
+
+        if be_choosy and n_kept1 < min_stars_preferred:
+            # We can't possibly meet our goal, and if n_kept1 = 0 the size
+            # cutoff computation will raise an error.
+            print(
+                f"dasch-wcssextractor: relaxing; got {n_seen}/{n_kept1} sources, not {min_stars_preferred}"
+            )
+            continue
+
+        # Filter based on source size. We don't want to be too stringent here,
+        # for three reasons. First, brighter sources are bigger, and are also
+        # often more likely to be good reference stars. Second, on many plates
+        # the PSF varies wildly between the plate center and edge. Third, on
+        # multiple-exposure plates, stars from the different exposures may have
+        # significantly different typical sizes, and we want to accept stars
+        # from all exposures.
+
+        size_pcts = np.percentile(size, [10, 50, 90, 95, 99, 99.9])
+        size_cutoff = CUTOFF_SIZE_FACTOR * size_pcts[2]
+        print(
+            f"dasch-wcssextractor: size cutoff {size_cutoff:.3f}; percentiles: {size_pcts}"
+        )
+        f = size < size_cutoff
+        x = x[f]
+        y = y[f]
+        mag = mag[f]
+        size = size[f]
+        ellip = ellip[f]
+        n_kept2 = x.size
+
+        if be_choosy and n_kept2 < min_stars_preferred:
+            print(
+                f"dasch-wcssextractor: relaxing; got {n_seen}/{n_kept1}/{n_kept2} sources, not {min_stars_preferred}"
+            )
+            continue
+
+        # Filter based on source ellipticity. Here too we can't be too
+        # stringent, since some images have truly ridiculous PSFs, the PSFs are
+        # not spatially uniform, etc. However, high ellipticity is a good
+        # indicator of spurious detections.
+
+        ellip_pcts = np.percentile(ellip, [50, 90, 95, 99, 99.9])
+        # halfway between 90th percentile and the maximum possible:
+        ellip_cutoff = 0.5 * (ellip_pcts[1] + 1)
+        print(
+            f"dasch-wcssextractor: ellipticity cutoff {ellip_cutoff:.3f}; percentiles: {ellip_pcts}"
+        )
+        f = ellip < ellip_cutoff
+        x = x[f]
+        y = y[f]
+        mag = mag[f]
+        size = size[f]
+        ellip = ellip[f]
+        n_kept3 = x.size
+
+        if be_choosy and n_kept3 < min_stars_preferred:
+            print(
+                f"dasch-wcssextractor: relaxing; got {n_seen}/{n_kept1}/{n_kept2}/{n_kept3} sources, not {min_stars_preferred}"
+            )
+            continue
+
+        # If we got here, we're happy and can stop
+        break
+
+    # We have an acceptable source list. Sort by magnitude and limit to the
+    # brightest stars
+
+    s = np.argsort(mag)
+    s = s[:N_STARS]
+    print(
+        f"dasch-wcssextractor: {n_seen} (seen) => {n_kept1} (flag/mag cut) => {n_kept2} (size cut) => {n_kept3} (ellip cut) => {s.size} (cap)"
+    )
+
+    if s.size < MIN_STARS_OUT:
+        print(
+            f"dasch-wcssextractor: fatal error: too few stars",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    x = x[s]
+    y = y[s]
+    mag = mag[s]
+    size = size[s]
+
+    # We're ready to emit
+
+    with NamedTemporaryFile(
+        mode="wt", dir=os.path.dirname(settings.out_path), delete=False
+    ) as f:
+        for this_x, this_y, this_mag, this_size in zip(x, y, mag, size):
+            print(this_x, this_y, this_mag, this_size, file=f)
+
+    os.rename(f.name, settings.out_path)
+
+
+if __name__ == "__main__":
+    main()

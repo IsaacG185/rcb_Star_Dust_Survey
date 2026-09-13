@@ -1,0 +1,208 @@
+#! /usr/bin/env python3
+# Copyright the President and Fellows of Harvard College
+# Licensed under the MIT License
+
+"""
+This program checks the output of `dasch-imwcs` by seeing what answers the
+final image WCS gets compared to the Astrometry.Net solution. Astrometry.Net
+will virtually never give a false positive, while `dasch-imwcs` has a tendency
+to make the WCS worse if the input catalog isn't in good shape.
+"""
+
+import argparse
+import sys
+import warnings
+
+from astropy.io import fits
+from astropy.table import Table
+from astropy.wcs import WCS
+import numpy as np
+
+# Cutoff for this value determined by processing a subset of ~20k mosaics with
+# successful astrometric analysis, and visually examining a sampling of
+# solutions on the sky. It's not exact, but images with ratios <~ 3.5 generally
+# looked pretty good, and ones >~ 4 started having noticeable flaws. This held
+# true for both bin16 and bin01 mosaics. Did not analyze whether cutoffs might
+# depend on plate scale / series or other factors.
+REJECT_RATIO = 3.75
+
+# The pixel separation we fill in if any of the coordinates come out as NaNs
+AWFUL_SEPARATION = 1000.0
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        choices=["bin16", "bin01"],
+        metavar="MODE",
+        required=True,
+        help="The processing mode",
+    )
+    parser.add_argument(
+        "--rotation",
+        metavar="DEG",
+        type=int,
+        required=True,
+        help="The rotation of the DASCH solution compared to Astrometry.Net",
+    )
+    parser.add_argument(
+        "--mirror",
+        action="store_true",
+        help="The DASCH solution is mirrored on the X axis, compared to Astrometry.Net",
+    )
+    parser.add_argument(
+        "--header",
+        action="store_true",
+        help="The candidate input is a freestanding FITS header, not a full FITS image",
+    )
+    parser.add_argument(
+        "--corr",
+        metavar="PATH",
+        required=True,
+        help='The path to the Astrometry.Net "corr" file',
+    )
+    parser.add_argument(
+        "--cand",
+        metavar="FITS-PATH",
+        help="The path to the candidate FITS image with WCS",
+    )
+
+    settings = parser.parse_args()
+
+    with warnings.catch_warnings():
+        # We don't actually need to do anything different in --header mode.
+        # Astropy will warn about file truncation, but we swallow warnings
+        # anyway to ignore WCS complaints.
+        warnings.filterwarnings("ignore")
+
+        with fits.open(settings.cand) as hdul:
+            header = hdul[0].header
+
+            if "PV1_5" in header:
+                header["CTYPE1"] = "RA---TPV"
+                header["CTYPE2"] = "DEC--TPV"
+
+            wcs = WCS(header)
+            image_shape = hdul[0].shape
+
+        with fits.open(settings.corr) as hdul:
+            t = Table(hdul[1].data)
+
+    # table columns are:
+    # - field_{x,y,ra,dec,id}
+    # - index_{x,y,ra,dec,id}
+    # - match_weight
+    # - MAG_ISO
+
+    # A.Net is run on the bin16 file, so to translate its pixel coordinates to
+    # bin01-land, we need to multiply them by 16.
+    if settings.mode == "bin16":
+        pixel_scale = 1
+        reject_code = 35
+    else:
+        pixel_scale = 16
+        reject_code = 36
+
+    # To set expectations, compute the pixel offsets of the original
+    # Astrometry.Net solution.
+
+    t["orig_sep"] = pixel_scale * np.hypot(
+        t["field_x"] - t["index_x"], t["field_y"] - t["index_y"]
+    )
+
+    def wrms(colname: str) -> float:
+        x = t[colname] ** 2
+        x = (x * t["match_weight"]).sum() / t["match_weight"].sum()
+        return np.sqrt(x)
+
+    print(
+        "@checkastrom* orig_percentiles=",
+        ",".join(
+            f"{p:.2f}" for p in np.percentile(t["orig_sep"].data, [10, 50, 90, 95, 99])
+        ),
+        sep="",
+    )
+    orig_rms = wrms("orig_sep")
+    print(f"@checkastrom* orig_rms={orig_rms:.2f}")
+
+    # "expected" are the pixel coordinates that we expect the good reference
+    # stars to land at. We expect them to land at virtually the same locations
+    # as what Astrometry.Net found ... except, if a rotation was applied, we
+    # need to translate the original X/Y pixel coordinates of the known-good
+    # stars to the rotated frame. And, if we are looking at the bin01 image, we
+    # need to scale to account for the (un)binning.
+    #
+    # The X/Y values in the A.Net data table are 1-based pixel coordinates where
+    # integer values lie at pixel centers. The ones coming out of
+    # world_to_pixel_values() are 0-based with the same centering convention.
+    # So, consider the edges of the first pixel. If we're unbinning by 16, a
+    # coordinate of 0.5 should map to -0.5, and a coordinate of 1.5 should map
+    # to 15.5. This works out to:
+
+    expected_x = (t["index_x"] - 0.5) * pixel_scale - 0.5
+    expected_y = (t["index_y"] - 0.5) * pixel_scale - 0.5
+
+    if settings.rotation == 0:
+        pass
+    elif settings.rotation == 90:
+        temp = expected_x
+        expected_x = image_shape[1] - 1 - expected_y
+        expected_y = temp
+        del temp
+    elif settings.rotation == 180:
+        expected_x = image_shape[1] - 1 - expected_x
+        expected_y = image_shape[0] - 1 - expected_y
+    elif settings.rotation == 270:
+        temp = expected_y
+        expected_y = image_shape[0] - 1 - expected_x
+        expected_x = temp
+        del temp
+    else:
+        raise Exception(f"unexpected rotation {settings.rotation}")
+
+    if settings.mirror:
+        # TODO: I *think* this should happen after the rotation, but I'm not sure.
+        expected_x = image_shape[1] - 1 - expected_x
+
+    # "candidate" are the pixel coordinates where the reference stars land,
+    # according to our candidate WCS solution.
+    #
+    # Some of these can be NaNs, if the WCS is really messed up.
+
+    cand_x, cand_y = wcs.world_to_pixel_values(t["index_ra"], t["index_dec"])
+
+    t["cand_sep"] = np.hypot(cand_x - expected_x, cand_y - expected_y)
+    bad = ~np.isfinite(t["cand_sep"])
+    n_bad = bad.sum()
+
+    if n_bad:
+        t["cand_sep"][bad] = AWFUL_SEPARATION
+        print(f"@checkastrom* badseps n={n_bad}")
+
+    # Compare.
+
+    print(
+        "@checkastrom* cand_percentiles=",
+        ",".join(
+            f"{p:.2f}" for p in np.percentile(t["cand_sep"].data, [10, 50, 90, 95, 99])
+        ),
+        sep="",
+    )
+    cand_rms = wrms("cand_sep")
+    print(f"@checkastrom* cand_rms={cand_rms:.2f}")
+
+    # Check quality
+
+    ratio = cand_rms / orig_rms
+    accept = ratio < REJECT_RATIO
+    print(
+        f"@checkastrom* result ratio={ratio:.3f} cutoff={REJECT_RATIO:.3f} accept={accept:d}"
+    )
+
+    if not accept:
+        sys.exit(reject_code)
+
+
+if __name__ == "__main__":
+    main()

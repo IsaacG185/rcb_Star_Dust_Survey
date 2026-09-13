@@ -1,0 +1,56 @@
+# Check the binning algorithm
+device binpoints.ps/cps
+#device /xw
+
+viewport 0.1 0.66 0.1 1.0
+symbol 16
+lim 0 22026 0 22026
+box
+color 2
+data binpoints_1.tmp
+xc 1
+yc 2
+points
+color 3
+data binpoints_2.tmp
+xc 1
+yc 2
+points
+color 4
+data binpoints_3.tmp
+xc 1
+yc 2
+points
+color 5
+data binpoints_4.tmp
+xc 1
+yc 2
+points
+color 9
+data binpoints_5.tmp
+xc 1
+yc 2
+points
+color 7
+data binpoints_6.tmp
+xc 1
+yc 2
+points
+color 8
+data binpoints_7.tmp
+xc 1
+yc 2
+points
+color 6
+data binpoints_8.tmp
+xc 1
+yc 2
+points
+color 10
+data binpoints_9.tmp
+xc 1
+yc 2
+points
+
+
+exit

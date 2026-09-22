@@ -1,0 +1,10 @@
+[What I did]
+- Got Overleaf draft done
+
+[To Do]
+- More plates in mine than in DASCH. Dimmer than 16th, these are bad. This is just noise, so look at these dim plates and see what DASCH does for these.
+    - Use plate limit number for these.
+- Do same for brighter than 8th magnitude, see what DASCH does. 
+- Ask about cutout pipeline.
+- Abstract for AAS; due 30th September
+- Try smaller bins for plotting, focus on smaller behavior and look at more individual plates.

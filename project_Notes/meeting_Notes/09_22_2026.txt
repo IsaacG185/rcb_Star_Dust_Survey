@@ -8,3 +8,9 @@
 - Ask about cutout pipeline.
 - Abstract for AAS; due 30th September
 - Try smaller bins for plotting, focus on smaller behavior and look at more individual plates.
+- Show magnitudes; straight line for log counts
+
+- Remove error bars on SISaP plot.
+- Don't include individual notebook names.
+- Acknowledgements
+- Add scientifically prepared package after the summary, not before

@@ -1,0 +1,19 @@
+- Slightly adjusted the abstract.
+- Replaced cutouts with DASCH selected cutouts for Phase I of stars (rcb_Bright_Targets.txt); when doing so, noticed that some target stars are neighbors, so just used same cutouts for targets
+that were near one another.
+
+
+[To Do]
+- More plates in mine than in DASCH. Dimmer than 16th, these are bad. This is just noise, so look at these dim plates and see what DASCH does for these.
+    - Use plate limit number for these.
+- Do same for brighter than 8th magnitude, see what DASCH does. 
+- Ask about cutout pipeline.
+- Try smaller bins for plotting, focus on smaller behavior and look at more individual plates.
+- Show magnitudes; straight line for log counts
+
+- Possible error: number of counts I get on plates is low; look up how DASCH is calculating errors, otherwise fit to photometric sequence (least-squares fit to get error). Look at number of counts
+used to calculate error in DASCH, see how much my pipeline is, if its too low try to fix if not do photometric sequence. If DASCH still had low counts, did they use least squares? or what did they do?
+
+- Get lightcurves for phase I of DASCH and mine; check the errors.
+
+- Submit Abstract for AAS; due 30th September (extended)

@@ -1,0 +1,44 @@
+- How does DASCH calculate errors?
+    - Nearby stars, conditions of plate (distance of star from center)
+    - Non-variable stars, measure rms of observations on light curve
+
+In measure_aperture in main cell, sep.sum_circann(...) 
+returns the sum of all pixel values in the annulus. 
+The next line divides by the annulus area, which is a plain mean.
+
+Big circles with a median sky (06279 idea) did not work. 
+fixed30_med and fixed45_med are −1.0 and −0.9 mag off on the faint plates and the scatter roughly 
+triples. A larger aperture picks up more sky noise and neighbours. 
+06279 got worse as well (1.32 to 1.60). 
+Its calibration RMS is about 0.9, so the limit there is the calibrators, not the aperture.
+
+Adjustment: Use SExtractor to get fwhm of standard stars on plate, get number, and run it on that. 
+This plate may not be alone; there could be other places temporally nearby, and we could just use those instead
+of plates like this. use this plate if it is alone/not many plates nearby in time, but otherwise try to focus
+on plates that will be more useful (i.e. one good plate for a given night, week, etc.).
+Use:
+    - Plate limit
+    - Smallest FWHM
+This kind of measurement is easy by eye.
+Try using 2D psf. Maybe in Astropy?
+Maybe try picking a region of sky that has no stars, then apply that, use same sky correction for every star.
+
+
+WCS shift correction (03041 idea) didn't work. 
+The distance to DASCH’s position goes from a median of 2.6 px to 4.2 px, 
+and the fraction within 3 px drops from 54% to 43%. On 03041 the stars give a 
+shift of only (1.2, −1.7) px, but DASCH’s position is about 16 px from the WCS position. 
+That fits a local distortion on that plate, which no constant shift can fix. 
+Searching the segmentation map around the predicted position, which the pick already does, 
+is the right fix, and 03041 now lands at −0.07.
+
+
+[To Do]
+- Remove my error calculator
+- Plot standards on particular plate, doing least squares fit, seeing what the rms is.
+
+- Maybe try picking a region of sky that has no stars, then apply that, 
+use same sky correction for every star.
+- Try SISaP on UW Cen
+- Try to get FWHM of SExtractor; order plates by plate limit and FHWM, get deepest and best images,
+see what resulting lightcurve looks like.

@@ -1,0 +1,13 @@
+- To Do
+Double check to make sure I am using sky median, not average
+06279 : Annulus needs to be bigger; inner circle should be size of big circle; start with fixed size, see how it goes, then move on to variable
+Right now, the annulus size is fixed; try variable, and define what the variable annulus is based on; usually inner is 10 - 20 arcsec,
+find how dasch 
+00859 : Example of one to throw out, can only do by eye so maybe put filter on these that need to be done by hand.
+
+03401 : Correct WCS; use SExtractor, use standard deviations; this shouldn't be thrown out
+
+- For all stars, phase 1 download on surface pro (don't need cutouts, just need DASCH curves with filters), start with brightest then go to faintest,
+then get ready for phase 2 in tisserand 
+
+- Distribtuion of stars with plates vs. without

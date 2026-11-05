@@ -1,0 +1,2 @@
+- Some star plates DASCH light curves are decent, some get like no stars (EROS2-GC-RCB-06 gets like no plates). Why?
+- Run on UW Cen

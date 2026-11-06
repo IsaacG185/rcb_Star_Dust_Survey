@@ -1,0 +1,11 @@
+# Packages for the working notebooks (01_Load_Cutout, dasch_Lightcurve_Generation, 02_A_SISaP) in one Python environment.
+# Install with:  pip install -r requirements_base.txt
+daschlab
+sep
+astropy
+numpy
+scipy
+pandas
+matplotlib
+ipywidgets
+statsmodels

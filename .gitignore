@@ -1,3 +1,6 @@
 test_CNN/data/
 test_CNN/outputs/
 data
+local_paths.json
+data/
+__pycache__/

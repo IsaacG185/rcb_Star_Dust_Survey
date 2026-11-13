@@ -1,0 +1,208 @@
+[Progress Report]
+
+1. COLOUR TERM FIX
+------------------
+What: Plates where the colour term switched on were 0.5 to 1.3 mag too
+      bright. The slope was 2 to 3 times too big, and the target never
+      got its colour added back.
+Fix:  Least-squares slope, kept only if clearly significant, and a fixed
+      colour of 0.3 for the target.
+Result: Agreement with DASCH (within 0.5 mag) 74% -> 84%.
+Where: Cell 1, functions global_calibration / calibrate_target
+       (COLOR_FIT = 'ols', COLOR_C = 0.3).
+
+
+2. GUARDS (STOP BAD POINTS BEING PUBLISHED)
+-------------------------------------------
+What: Three rules turn bad measurements into limits or low confidence:
+  - Plate limit: fainter than DASCH's limit - 0.5 becomes a limit.
+  - Pick distance: object more than 10 px from the target is dropped
+    (it was usually a neighbour).
+  - Reach: more than 2 mag brighter than the brightest calibrator is
+    dropped.
+Result: Agreement 88% -> 91% on 10,463 plates, with 19% fewer points
+        (17,694 -> 14,381), mostly wrong ones.
+Where: Cell 1 settings PLATE_LIMIT_GUARD, PICK_REJECT_PX = 10,
+       REACH_REJECT_GAP = 2.0.
+
+
+3. HONEST ERROR BARS
+--------------------
+What: Quoted errors were 2 to 5 times too big. Example: quoted 0.38 mag,
+      real scatter 0.15.
+Fix:  Errors recalibrated against same-night plate pairs (5,365 pairs,
+      13 stars).
+Result: Pull sd went from 0.2-0.5 to 0.6-0.9 (honest = 1). Still a bit
+        conservative on purpose.
+Where: Cell 1, ERROR_CALIBRATION = True. Columns in lightcurve.csv:
+       magnitude_error (calibrated), magnitude_error_quoted (old).
+
+
+4. EDGE SHIFT
+-------------
+What: Targets just brighter than the brightest calibrator (flag 'edge')
+      came out about 0.30 mag too faint vs DASCH.
+Fix:  Published edge points made 0.25 mag brighter.
+Result: S Aps 87% -> 90%; R CrB 85% -> 97%. RY Sgr got slightly worse.
+Where: Cell 1, EDGE_SHIFT = 0.25 (column mag_unshifted = original).
+
+
+5. DASCH BLEND ON V854 CEN
+--------------------------
+What: DASCH's flat band near 12 mag is not V854 Cen (B=8.3). It is a
+      neighbour (B=12.0) 33" (23 px) south.
+Evidence: On 514 DASCH-accepted plates the picked object was over 10 px
+      away, with median magnitude about 12.1 (neighbour = 12.02). On
+      plates where we picked the target, DASCH scatter was large (std
+      2.1), as expected for the real star.
+Result: "Accepted" does not remove blends. SISaP drops those plates.
+Show:  V854_Cen/02_A/sisap_dasch_stacked.png; V854_Cen/02_A/
+       apass_field.csv (the two stars); any image in V854_Cen/DASCH/
+       cutouts.
+
+
+6. V517 OPH: A LIGHT CURVE DASCH DOES NOT HAVE
+----------------------------------------------
+What: DASCH has no light curve (no plates accepted). SISaP gives 405
+      points.
+Check: Same-night repeatability (error pull 1.02, ideal 1). No
+      independent comparison yet.
+Show:  V517_Oph/02_A/sisap_dasch_stacked.png (DASCH side empty).
+Also:  V581 CrA, 504 points vs few in DASCH.
+
+
+7. SAME-NIGHT PRECISION VS DASCH
+--------------------------------
+What: Pairs of plates less than 0.5 day apart, same plates for both
+      methods. Scatter of one measurement = robust sd of differences
+      / sqrt 2. Independent of DASCH being "right", but blind to
+      errors that repeat (blends).
+Result (3,608 pairs): SISaP 0.114 mag, DASCH 0.121 (ratio 0.94).
+  Better:  SU Tau 0.074 vs 0.140, V2552 Oph 0.046 vs 0.083,
+           UW Cen 0.054 vs 0.068, RS Tel 0.097 vs 0.117.
+  Equal:   Y Mus, V_CrA, V348 Sgr, V854 Cen (ratio 0.94 to 0.96).
+  Worse:   RY Sgr 0.411 vs 0.175 (crowded), S Aps 0.177 vs 0.117,
+           U Aqr 0.155 vs 0.119, V581 CrA (22 pairs only).
+  High-confidence points beat DASCH on 8 of 9 stars.
+Where: repeatability_cell.py (read-only; reads each star's
+       02_A/lightcurve.csv).
+
+
+8. AGREEMENT WITH DASCH
+-----------------------
+Result: 89 to 98% within 0.5 mag on 11 of 13 stars (UW Cen 98, V348 Sgr
+        98, R CrB 97, U Aqr 95, SU Tau 94, V2552 Oph 94, V581 CrA 94,
+        Y Mus 93, RS Tel 92, S Aps 90, V_CrA 89). Weak: V854 Cen 82,
+        RY Sgr 75 (crowded).
+Caveat: DASCH is the comparison, not the truth.
+Where:  the PLOT SUMMARY table printed by Cell 1.
+
+
+9. THE BRIGHT END (R CRB, XX CAM)
+---------------------------------
+What: Their maxima (7 to 9 mag) are 3 to 4 mag brighter than any
+      usable calibrator. APASS has nothing brighter than V=10, and our
+      brightest calibrator in the R CrB cutout is about B=12.8.
+Result: R CrB: 37 points, all fainter than 12.7 mag, 97% agreement on
+        34 shared plates, tracking the dust declines; 90% of DASCH's
+        414 points are bright and come out as limits (correctly). XX
+        Cam: 1 point.
+Tried and failed: Gaia as reference (R CrB 74% -> 41%), extrapolating
+        past the calibrators (off by 1.5 to 3 mag), size vs magnitude,
+        forced photometry (about 1.2 mag too bright on V854 Cen),
+        binned full plates (0.4 to 0.55 mag scatter).
+Show:  R_CrB/02_A/sisap_dasch_stacked.png; limits in R_CrB/02_A/
+       limits.csv.
+
+
+10. WHY DASCH DOES BETTER AT THE BRIGHT END
+-------------------------------------------
+  - It calibrates on the whole plate, split into 9 rings with 100+
+    calibrators each. Our cutout has a handful.
+  - It extends the calibration curve in a straight line past the
+    saturation point, down to mag 6, and flags those points as
+    extrapolated.
+  - It fits a plate-wide saturation model on thousands of stars.
+  - It uses ATLAS where APASS runs out.
+Caveat: those bright values are extrapolated, and DASCH saturates near
+        8th mag, so maxima are underestimated.
+
+
+11. Dr. Clayton FWHM Method
+-------------------
+Why it doesn't work for us:
+  - His three calibrators are 11 to 12.4 mag, but the star is much
+    brighter, so it extrapolates.
+  - Our own size-vs-magnitude test failed (Spearman -0.12 XX Cam, -0.68
+    R CrB, -0.62 RY Sgr).
+  - It is manual (positions read off in ds9), so it can't run on
+    thousands of plates.
+How we could use it:
+  - As a spot check on a few bright plates against DASCH and our limits.
+  - If he can show it is accurate at the bright end, we could automate 
+  it. Dr. Clayton notebook doesn’t tell us how he checked, and I 
+  haven’t seen a comparison against anything at the bright end.
+   Need: 
+   - Pick stars in the same cutouts that are as bright as R CrB 
+   at maximum (7 to 9 mag) and have a trusted catalogue magnitude. 
+   Candidates are Tycho-2 or Hipparcos B, or Gaia-derived values. 
+   APASS has nothing there, so these would need a conversion to B, 
+   adding roughly 0.1 to 0.2 mag of uncertainty.
+   - Treat each as the unknown “target”. Fit his three faint 
+   calibrators, read off the star’s magnitude, and 
+   compare with the catalogue.
+   - The scatter and any bias tell us directly whether the 
+   extrapolation works. This is the test that matches how he uses it.
+
+
+12. STARNET (MACHINE LEARNING)
+------------------------------
+What: A small CNN trained on APASS stars cut from the real plates
+      (never on DASCH). It outputs a magnitude, its own error, the star
+      position and a star / not-star probability. Merged with SISaP into
+      an "improved" light curve.
+Status: Tested on synthetic plates only (validation scatter 0.05 to
+        0.09 mag). Real run waits for the other computer.
+Where: 03_A_PyTorch.ipynb + rcb_starnet.py. Nothing to show yet.
+
+
+NEXT STEPS
+----------
+1. Run StarNet on the real plates once the other computer is ready, and
+   compare it with SISaP and DASCH.
+2. Restructure the DeepDisc notebook the same way, then compare the two
+   ML methods.
+3. Bright end: his ATLAS answer, and a spot check with his FWHM values.
+4. Weak stars: RY Sgr (crowding), V854 Cen (shallow series), S Aps and
+   U Aqr (precision).
+5. Independent check: compare V517 Oph (and one more RCB star) with
+   AAVSO and ASAS-SN in the years they overlap.
+6. Write up the results.
+
+
+NUMBERS TO CHECK BEFORE THE MEETING
+-----------------------------------
+Confirm in each star's 02_A/run_summary.txt or the latest Cell 1 output:
+  - V517 Oph: 2,574 plates, 280 high confidence, median 13.4 mag
+  - V581 CrA: 38 DASCH points
+  - Extra points vs DASCH: UW Cen +810, Y Mus +837, V581 CrA +468
+  - V854 Cen 82% and RY Sgr 75% (an earlier run gave 81% and 74%)
+
+  [Meeting Notes]
+
+Questions: 
+1. Is ATLAS Refcat2 (accepted by daschlab) on a B system close enough to
+   DASCH's APASS-calibrated one to try it for R CrB and XX Cam? It is the
+   only untested route to the bright phases.
+2. Your FWHM method fits three APASS stars (11 to 12.4 mag) and reads off
+   a star that is much brighter, so it is extrapolated. How did you check
+   it at the bright end? Our own size-vs-magnitude test did not hold up.
+   What differs in your approach?
+3. How accurate do dip depth and timing need to be for dust-decline work?
+   Is our same-night precision (about 0.11 mag) good enough?
+
+
+
+  [To Do]
+
+

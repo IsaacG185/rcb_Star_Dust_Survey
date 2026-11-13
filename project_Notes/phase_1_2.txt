@@ -1,0 +1,25 @@
+# [Phase 1]
+
+# Phase 1 targets were sourced in Clayton 2012a. Table 1 of Clayton (2012a), same as the ranking.
+# Name|RA|Dec. RA is in hours and Dec in degrees, both J2000 (hh mm ss.ss|+dd mm ss.s). Lines starting with # are ignored.
+
+R CrB|15 48 34.41|+28 09 24.3
+RY Sgr|19 16 32.76|-33 31 20.4
+UW Cen|12 43 17.18|-54 31 40.7
+V CrA|18 47 32.30|-38 09 32.3
+
+# [Phase 2]
+
+V854 Cen|14 34 49.41|-39 33 19.2
+XX Cam|04 08 38.75|+53 21 39.5
+RS Tel|18 18 51.22|-46 32 53.4
+V CrA|18 47 32.30|-38 09 32.3
+SU Tau|05 49 03.73|+19 04 22.0
+S Aps|15 09 24.53|-72 03 45.1
+V581 CrA|18 24 43.46|-45 24 43.8
+Y Mus|13 05 48.19|-65 30 46.7
+U Aqr|22 03 19.70|-16 37 35.2
+V348 Sgr|18 40 19.93|-22 54 29.3
+V2552 Oph|17 23 14.55|-22 52 06.3
+V517 Oph|17 15 19.74|-29 05 37.6
+

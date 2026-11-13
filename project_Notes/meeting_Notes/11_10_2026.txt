@@ -1,0 +1,37 @@
+- On some UW Cen plates DASCH says “no detection” (or flags them), 
+but the star is visible. SISaP couldn’t show that, 
+because Cell 1 only runs on the plates DASCH accepted.
+
+- I changed the download so we now have the plates DASCH rejected or 
+didn’t detect. UW Cen has 3,243 cutouts on disk, 
+and 2,802 of them are plates DASCH didn’t accept. Still running this.
+
+- DASCH has been very slow lately (avg. speed of 0.22 plate/sec).
+
+- Color correction: an ordinary least-squares slope. 
+It is kept only if it’s clearly real (slope at least 3 times its error) 
+and it actually lowers the scatter. Otherwise k is zero. 
+Agreement with DASCH went from 74% to 84% across 13 stars.
+
+- Waiting to run SISaP on V517 Oph next, those results seem interesting.
+
+- XX Cam: far brighter than anything SISaP can calibrate from a cutout. 
+The APASS stars around it only reach to about 4 mag fainter than XX Cam, 
+so nearly every plate comes out as a limit, which this plot doesn’t draw. 
+The 2 points that did get published are almost certainly wrong
+
+    - Why DASCH can do it: it calibrates against the whole plate, 
+    with an extra bright-star catalogue (ATLAS), 
+    and extrapolates the bright end down to about 6 mag. 
+    This would be COSTLY to do.
+
+We run all the stars because
+the 13-star run shows where it works (most of them) 
+and where it doesn’t (bright stars like XX Cam). 
+That per-star record is also what the PyTorch and DeepDisc 
+comparisons will build on. If it finds that the struggle is with bright stars,
+then run full plate downaloads on bright targets.
+
+[Post Meeting]
+
+- Plate cutouts should work for bright stars. Try to fit PSF wings on more saturated/bright stars. Measuring FWHM of star.
